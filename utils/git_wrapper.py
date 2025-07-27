@@ -1,4 +1,8 @@
-"""Git wrapper utilities"""
+"""
+Git wrapper utilities for the OpenGameAssetLibrary
+Provides functions to interact with git repository for tracking asset changes
+"""
+
 import subprocess
 import os
 
@@ -13,61 +17,91 @@ def run_git(command):
             capture_output=True,
             text=True
         )
-        
-        if result.returncode != 0:
-            raise Exception(f"Git command failed: {result.stderr}")
-            
+        if result.returncode != 0 and result.stderr:
+            print(f"Git warning: {result.stderr}")
         return result.stdout.strip(), result.returncode
     except Exception as e:
-        raise Exception(f"Git error: {str(e)}")
+        print(f"Git error: {e}")
+        return str(e), 1
 
-def get_file_history(filepath):
+def get_file_history(file_path):
     """Get the git history for a specific file"""
     try:
-        log_output, _ = run_git(f'log --pretty=format:"%H|%an|%ad|%s" --date=iso -- {filepath}')
+        log_output, return_code = run_git(f'log --oneline -- {file_path}')
+        
+        if return_code != 0:
+            return []
         
         commits = []
         for line in log_output.split('\n'):
-            if line:
-                parts = line.split('|', 3)
-                if len(parts) == 4:
-                    commits.append({
-                        "hash": parts[0],
-                        "author": parts[1],
-                        "date": parts[2],
-                        "message": parts[3]
-                    })
+            if line.strip():
+                parts = line.split(' ', 1)
+                commits.append({
+                    "hash": parts[0],
+                    "message": parts[1] if len(parts) > 1 else "",
+                    "short_hash": parts[0][:7]
+                })
         
         return commits
     except Exception as e:
+        print(f"Error getting file history: {e}")
         return []
 
-def get_current_branch():
-    """Get the current git branch name"""
+def get_repo_status():
+    """Get current repository status"""
     try:
-        branch, _ = run_git("rev-parse --abbrev-ref HEAD")
-        return branch
-    except:
-        return "main"
+        status_output, _ = run_git("status --porcelain")
+        branch_output, _ = run_git("rev-parse --abbrev-ref HEAD")
+        
+        changed_files = []
+        if status_output.strip():
+            for line in status_output.strip().split('\n'):
+                if line.strip():
+                    status_code = line[:2]
+                    filename = line[3:]
+                    changed_files.append({
+                        "file": filename,
+                        "status": status_code.strip()
+                    })
+        
+        return {
+            "branch": branch_output or "main",
+            "changed_files": changed_files,
+            "changes_count": len(changed_files)
+        }
+    except Exception as e:
+        print(f"Error getting repo status: {e}")
+        return {
+            "branch": "unknown",
+            "changed_files": [],
+            "changes_count": 0
+        }
+
+def commit_changes(message, files=None):
+    """Add and commit changes with a message"""
+    try:
+        if files:
+            for file in files:
+                run_git(f"add {file}")
+        else:
+            run_git("add .")
+        
+        output, return_code = run_git(f'commit -m "{message}"')
+        return return_code == 0, output
+    except Exception as e:
+        print(f"Error committing changes: {e}")
+        return False, str(e)
 
 def init_repo():
     """Initialize git repository if it doesn't exist"""
     if not os.path.exists(os.path.join(LIBRARY_PATH, ".git")):
-        os.makedirs(LIBRARY_PATH, exist_ok=True)
-        run_git("init")
-        run_git("config user.email 'library@example.com'")
-        run_git("config user.name 'Asset Library'")
-        
-        # Create initial assets directory
-        assets_dir = os.path.join(LIBRARY_PATH, "assets")
-        os.makedirs(assets_dir, exist_ok=True)
-        
-        # Create .gitignore
-        gitignore_path = os.path.join(LIBRARY_PATH, ".gitignore")
-        with open(gitignore_path, 'w') as f:
-            f.write("*.pyc\n__pycache__/\n.DS_Store\n")
-        
-        run_git("add .")
-        run_git('commit -m "Initial library setup"')
-        return True
-    return False
+        try:
+            os.makedirs(LIBRARY_PATH, exist_ok=True)
+            run_git("init")
+            run_git("config user.name 'Asset Library System'")
+            run_git("config user.email 'library@example.com'")
+            return True
+        except Exception as e:
+            print(f"Error initializing repo: {e}")
+            return False
+    return True
