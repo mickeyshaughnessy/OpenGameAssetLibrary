@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Integration tests for OpenGameAssetLibrary API
-Tests all major API endpoints to ensure they're working correctly
+Integration tests for Simple Asset Library API
+Tests the simplified API endpoints
 """
 
 import requests
@@ -38,7 +38,7 @@ def test_ping():
         print(f"❌ ERROR: {e}")
         return False
 
-def test_browse_empty():
+def test_browse_initial():
     print_test("Browse Assets - Initial State (/browse)")
     try:
         r = requests.get(f"{API_URL}/browse")
@@ -52,30 +52,33 @@ def test_browse_empty():
         return False
 
 def test_add_asset():
-    print_test("Add New Asset (/add_asset)")
+    print_test("Add New Asset (/add)")
     try:
         asset_data = {
-            "name": "Test Magical Sword",
-            "type": "item",
-            "author": "test_user",
-            "game_origin": "test_rpg",
-            "description": "A powerful sword for testing",
+            "name": "Test 3D Model Pack",
+            "type": "3d_models",
+            "author": "test_creator",
+            "description": "A collection of test 3D models",
             "attributes": {
-                "damage": 50,
-                "durability": 100
+                "file_count": 25,
+                "total_size": "150MB",
+                "format": "FBX"
             },
-            "tags": ["weapon", "magic", "test"],
-            "rarity": "rare"
+            "tags": ["3d", "models", "test"],
+            "rarity": "uncommon",
+            "file_extension": "zip"
         }
         
-        r = requests.post(f"{API_URL}/add_asset", json=asset_data)
+        r = requests.post(f"{API_URL}/add", json=asset_data)
         success = print_result(r.status_code, 200, r.text)
         
         asset_id = None
         if success:
             response_data = r.json()
             asset_id = response_data.get("asset", {}).get("id")
+            s3_url = response_data.get("asset", {}).get("s3_url")
             print(f"🆔 Asset ID: {asset_id}")
+            print(f"🔗 S3 URL: {s3_url}")
         
         return success, asset_id
     except Exception as e:
@@ -90,8 +93,9 @@ def test_browse_with_assets():
         if success:
             data = r.json()
             print(f"📊 Total assets: {data.get('total', 0)}")
-            for asset in data.get('assets', [])[:3]:  # Show first 3
-                print(f"   - {asset.get('name')} ({asset.get('type')})")
+            for asset in data.get('assets', []):
+                status = "✅ Available" if asset.get('available') else f"❌ Checked out to {asset.get('borrower')}"
+                print(f"   - {asset.get('name')} ({asset.get('type')}) - {status}")
         return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
@@ -100,12 +104,26 @@ def test_browse_with_assets():
 def test_search():
     print_test("Search Assets (/search)")
     try:
+        # Test text search
         r = requests.get(f"{API_URL}/search?q=test")
         success = print_result(r.status_code, 200, r.text)
         if success:
             data = r.json()
-            print(f"🔍 Search results: {data.get('total_results', 0)}")
+            print(f"🔍 Search results for 'test': {data.get('total_results', 0)}")
         return success
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        return False
+
+def test_get_asset(asset_id):
+    if not asset_id:
+        print("⏭️  Skipping get asset test - no asset ID")
+        return False
+        
+    print_test(f"Get Asset Details (/asset/{asset_id})")
+    try:
+        r = requests.get(f"{API_URL}/asset/{asset_id}")
+        return print_result(r.status_code, 200, r.text)
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
@@ -119,121 +137,83 @@ def test_checkout(asset_id):
     try:
         checkout_data = {
             "asset_id": asset_id,
-            "borrower": "test_player",
-            "game_context": "testing session"
+            "borrower": "test_user_123"
         }
         
         r = requests.post(f"{API_URL}/checkout", json=checkout_data)
-        return print_result(r.status_code, 200, r.text)
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            print(f"📦 Checked out to: {data.get('asset', {}).get('borrower')}")
+            print(f"🔗 Download URL: {data.get('asset', {}).get('s3_url')}")
+        return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
-def test_return_asset(asset_id):
+def test_checkout_already_taken(asset_id):
     if not asset_id:
-        print("⏭️  Skipping return test - no asset ID")
+        print("⏭️  Skipping duplicate checkout test - no asset ID")
         return False
         
-    print_test("Return Asset (/return)")
+    print_test("Try to Checkout Already Taken Asset (/checkout)")
     try:
-        return_data = {
+        checkout_data = {
             "asset_id": asset_id,
-            "borrower": "test_player",
-            "condition": "good"
+            "borrower": "another_user"
         }
         
-        r = requests.post(f"{API_URL}/return", json=return_data)
-        return print_result(r.status_code, 200, r.text)
+        r = requests.post(f"{API_URL}/checkout", json=checkout_data)
+        # Should return 400 because asset is already checked out
+        return print_result(r.status_code, 400, r.text)
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
-def test_asset_history(asset_id):
-    if not asset_id:
-        print("⏭️  Skipping history test - no asset ID")
-        return False
-        
-    print_test(f"Asset History (/history/{asset_id})")
+def test_stats():
+    print_test("Library Statistics (/stats)")
     try:
-        r = requests.get(f"{API_URL}/history/{asset_id}")
-        return print_result(r.status_code, 200, r.text)
+        r = requests.get(f"{API_URL}/stats")
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            stats = data.get('library_stats', {})
+            print(f"📈 Total: {stats.get('total_assets', 0)}")
+            print(f"📈 Available: {stats.get('available', 0)}")
+            print(f"📈 Checked out: {stats.get('checked_out', 0)}")
+        return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
-def test_library_history():
-    print_test("Library Statistics (/history)")
+def test_filtered_browse():
+    print_test("Browse with Filters (/browse?type=3d_models)")
     try:
-        r = requests.get(f"{API_URL}/history")
-        return print_result(r.status_code, 200, r.text)
+        r = requests.get(f"{API_URL}/browse?type=3d_models")
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            print(f"📊 3D Models found: {data.get('total', 0)}")
+        return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
-def test_generate_test_data():
-    print_test("Generate Test Data (/utils/generate)")
+def test_search_with_filters():
+    print_test("Search with Filters (/search?type=3d_models&rarity=uncommon)")
     try:
-        r = requests.post(f"{API_URL}/utils/generate?count=3")
-        return print_result(r.status_code, 200, r.text)
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_batch_import():
-    print_test("Batch Import (/batch/import)")
-    try:
-        batch_data = {
-            "assets": [
-                {
-                    "name": "Batch Asset 1",
-                    "type": "creature",
-                    "author": "batch_test",
-                    "game_origin": "batch_game"
-                },
-                {
-                    "name": "Batch Asset 2", 
-                    "type": "spell",
-                    "author": "batch_test",
-                    "game_origin": "batch_game"
-                }
-            ]
-        }
-        
-        r = requests.post(f"{API_URL}/batch/import", json=batch_data)
-        return print_result(r.status_code, 200, r.text)
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_export():
-    print_test("Export Collection (/export)")
-    try:
-        r = requests.get(f"{API_URL}/export?type=item")
-        return print_result(r.status_code, 200, r.text)
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_git_status():
-    print_test("Git Status (/utils/git-status)")
-    try:
-        r = requests.get(f"{API_URL}/utils/git-status")
-        return print_result(r.status_code, 200, r.text)
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_cleanup():
-    print_test("Cleanup Test Data (/utils/cleanup)")
-    try:
-        r = requests.post(f"{API_URL}/utils/cleanup")
-        return print_result(r.status_code, 200, r.text)
+        r = requests.get(f"{API_URL}/search?type=3d_models&rarity=uncommon")
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            print(f"🔍 Filtered results: {data.get('total_results', 0)}")
+        return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
 def main():
-    print("🚀 Starting OpenGameAssetLibrary Integration Tests")
+    print("🚀 Starting Simple Asset Library Integration Tests")
     print(f"🌐 API URL: {API_URL}")
     
     # Check if server is running
@@ -257,7 +237,7 @@ def main():
     
     # Run all tests
     run_test(test_ping)
-    run_test(test_browse_empty)
+    run_test(test_browse_initial)
     
     # Add an asset and get its ID
     success, asset_id = test_add_asset()
@@ -267,15 +247,16 @@ def main():
     
     run_test(test_browse_with_assets)
     run_test(test_search)
+    run_test(test_get_asset, asset_id)
+    run_test(test_stats)
+    run_test(test_filtered_browse)
+    run_test(test_search_with_filters)
     run_test(test_checkout, asset_id)
-    run_test(test_return_asset, asset_id)
-    run_test(test_asset_history, asset_id)
-    run_test(test_library_history)
-    run_test(test_generate_test_data)
-    run_test(test_batch_import)
-    run_test(test_export)
-    run_test(test_git_status)
-    run_test(test_cleanup)
+    run_test(test_checkout_already_taken, asset_id)
+    
+    # Test browse again to see checked out status
+    run_test(test_browse_with_assets)
+    run_test(test_stats)
     
     # Final results
     print(f"\n{'='*60}")
@@ -288,6 +269,7 @@ def main():
     
     if tests_passed == tests_run:
         print("🎉 ALL TESTS PASSED!")
+        print("\n✨ Your Simple Asset Library is working perfectly!")
         sys.exit(0)
     else:
         print("⚠️  Some tests failed. Check the output above.")
