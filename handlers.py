@@ -1,6 +1,7 @@
 """
 Simple Asset Library API Handlers - S3 Version
 Streamlined handlers for basic library operations using S3 storage
+Supports multiple simultaneous checkouts per asset
 """
 
 from flask import jsonify, request
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 S3_BUCKET = "mithrilmedia"
 S3_PREFIX = "OpenGameAssetLibrary"
 S3_ASSETS_PREFIX = f"{S3_PREFIX}/assets"
+S3_CHECKOUTS_PREFIX = f"{S3_PREFIX}/checkouts"
 S3_BASE_URL = f"https://{S3_BUCKET}.s3.us-east-1.amazonaws.com/{S3_PREFIX}"
 
 # Initialize S3 client
@@ -34,7 +36,7 @@ def ping():
     return jsonify({
         "status": "alive", 
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0-s3",
+        "version": "1.1-s3-multi-checkout",
         "s3_status": s3_status,
         "bucket": S3_BUCKET
     })
@@ -97,6 +99,51 @@ def _save_asset_to_s3(asset_id, asset_data):
         logger.error(f"Error saving asset to S3: {e}")
         return False
 
+def _save_checkout_record(checkout_id, checkout_data):
+    """Helper function to save checkout record to S3"""
+    if not s3_client:
+        return False
+    
+    try:
+        key = f"{S3_CHECKOUTS_PREFIX}/{checkout_id}.json"
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=json.dumps(checkout_data, indent=2),
+            ContentType='application/json'
+        )
+        return True
+    except ClientError as e:
+        logger.error(f"Error saving checkout record to S3: {e}")
+        return False
+
+def _count_asset_checkouts(asset_id):
+    """Count how many times an asset has been checked out"""
+    if not s3_client:
+        return 0
+    
+    try:
+        response = s3_client.list_objects_v2(
+            Bucket=S3_BUCKET,
+            Prefix=f"{S3_CHECKOUTS_PREFIX}/",
+            Delimiter='/'
+        )
+        
+        count = 0
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                try:
+                    checkout_response = s3_client.get_object(Bucket=S3_BUCKET, Key=obj['Key'])
+                    checkout_data = json.loads(checkout_response['Body'].read().decode('utf-8'))
+                    if checkout_data.get('asset_id') == asset_id:
+                        count += 1
+                except:
+                    continue
+        
+        return count
+    except ClientError:
+        return 0
+
 def browse():
     """List all assets in the library with optional filtering"""
     if not s3_client:
@@ -106,7 +153,6 @@ def browse():
     
     # Simple filters
     asset_type = request.args.get('type')
-    available = request.args.get('available')
     author = request.args.get('author')
     
     asset_keys = _list_asset_keys()
@@ -121,9 +167,9 @@ def browse():
                 continue
             if author and asset.get('author') != author:
                 continue
-            if available is not None:
-                if (available.lower() == 'true') != asset.get('available', True):
-                    continue
+            
+            # Count checkouts for this asset
+            checkout_count = _count_asset_checkouts(asset["id"])
             
             # Return simplified asset info
             assets.append({
@@ -131,11 +177,10 @@ def browse():
                 "name": asset["name"],
                 "type": asset.get("type"),
                 "author": asset.get("author"),
-                "available": asset.get("available", True),
-                "borrower": asset.get("borrower"),
                 "rarity": asset.get("rarity", "common"),
                 "tags": asset.get("tags", []),
-                "checkout_date": asset.get("checkout_date")
+                "checkout_count": checkout_count,
+                "created_at": asset.get("created_at")
             })
         except (json.JSONDecodeError, KeyError, ClientError) as e:
             logger.error(f"Error reading asset from S3 key {key}: {e}")
@@ -216,9 +261,6 @@ def add_asset():
             "type": data["type"],
             "author": data["author"],
             "description": data.get("description", ""),
-            "available": True,
-            "borrower": None,
-            "checkout_date": None,
             "attributes": data.get("attributes", {}),
             "s3_url": s3_url,
             "rarity": data.get("rarity", "common"),
@@ -238,7 +280,7 @@ def add_asset():
         return jsonify({"error": f"Failed to add asset: {str(e)}"}), 500
 
 def checkout():
-    """Check out an asset from the library (permanent checkout)"""
+    """Check out an asset from the library (non-exclusive - multiple users can checkout)"""
     if not s3_client:
         return jsonify({"error": "S3 not available"}), 500
     
@@ -247,40 +289,43 @@ def checkout():
         return jsonify({"error": "No JSON data provided"}), 400
         
     asset_id = data.get('asset_id')
-    borrower = data.get('borrower')
+    user = data.get('borrower') or data.get('user')  # Support both field names
     
-    if not asset_id or not borrower:
-        return jsonify({"error": "Missing asset_id or borrower"}), 400
+    if not asset_id or not user:
+        return jsonify({"error": "Missing asset_id or user/borrower"}), 400
     
     try:
         asset = _get_asset_from_s3(asset_id)
         if not asset:
             return jsonify({"error": "Asset not found"}), 404
         
-        if not asset.get("available", True):
-            return jsonify({
-                "error": f"Asset already checked out to {asset.get('borrower')}"
-            }), 400
+        # Create checkout record
+        checkout_id = str(uuid.uuid4())
+        checkout_record = {
+            "id": checkout_id,
+            "asset_id": asset_id,
+            "user": user,
+            "checkout_date": datetime.utcnow().isoformat(),
+            "asset_name": asset["name"],
+            "asset_type": asset.get("type"),
+            "s3_url": asset.get("s3_url")
+        }
         
-        # Update asset - permanent checkout
-        asset["available"] = False
-        asset["borrower"] = borrower
-        asset["checkout_date"] = datetime.utcnow().isoformat()
-        
-        if _save_asset_to_s3(asset_id, asset):
+        if _save_checkout_record(checkout_id, checkout_record):
             return jsonify({
                 "message": "Asset checked out successfully", 
-                "asset": {
-                    "id": asset["id"],
+                "checkout": {
+                    "checkout_id": checkout_id,
+                    "asset_id": asset["id"],
                     "name": asset["name"],
                     "type": asset.get("type"),
                     "s3_url": asset.get("s3_url"),
-                    "borrower": borrower,
-                    "checkout_date": asset["checkout_date"]
+                    "user": user,
+                    "checkout_date": checkout_record["checkout_date"]
                 }
             })
         else:
-            return jsonify({"error": "Failed to update asset in S3"}), 500
+            return jsonify({"error": "Failed to save checkout record"}), 500
         
     except Exception as e:
         return jsonify({"error": f"Failed to checkout asset: {str(e)}"}), 500
@@ -295,6 +340,9 @@ def get_asset(asset_id):
         if not asset:
             return jsonify({"error": "Asset not found"}), 404
         
+        # Add checkout count to asset info
+        asset["checkout_count"] = _count_asset_checkouts(asset_id)
+        
         return jsonify({"asset": asset})
     except Exception as e:
         return jsonify({"error": f"Failed to get asset: {str(e)}"}), 500
@@ -305,14 +353,14 @@ def library_stats():
         return jsonify({"error": "S3 not available"}), 500
     
     stats = {
-        "total_assets": 0, 
-        "available": 0,
-        "checked_out": 0, 
+        "total_assets": 0,
+        "total_checkouts": 0,
         "by_type": {}, 
         "by_rarity": {},
         "by_author": {}
     }
     
+    # Count assets
     asset_keys = _list_asset_keys()
     
     for key in asset_keys:
@@ -320,11 +368,6 @@ def library_stats():
             response = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
             asset = json.loads(response['Body'].read().decode('utf-8'))
             stats["total_assets"] += 1
-            
-            if asset.get("available", True):
-                stats["available"] += 1
-            else:
-                stats["checked_out"] += 1
             
             # Count by type
             asset_type = asset.get("type", "unknown")
@@ -340,6 +383,18 @@ def library_stats():
             
         except (json.JSONDecodeError, KeyError, ClientError):
             continue
+    
+    # Count total checkouts
+    try:
+        response = s3_client.list_objects_v2(
+            Bucket=S3_BUCKET,
+            Prefix=f"{S3_CHECKOUTS_PREFIX}/",
+            Delimiter='/'
+        )
+        if 'Contents' in response:
+            stats["total_checkouts"] = len(response['Contents'])
+    except ClientError:
+        pass
     
     return jsonify({"library_stats": stats})
 
