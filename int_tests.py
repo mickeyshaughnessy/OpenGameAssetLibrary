@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Integration tests for Simple Asset Library API
-Tests the simplified API endpoints
+Tests the simplified API endpoints including similarity search features
 """
 
 import requests
@@ -33,7 +33,13 @@ def test_ping():
     print_test("Health Check (/ping)")
     try:
         r = requests.get(f"{API_URL}/ping")
-        return print_result(r.status_code, 200, r.text)
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            db_status = data.get('database_status', {})
+            print(f"🗄️  Database Status: {db_status.get('status', 'unknown')}")
+            print(f"📊 Candles Count: {db_status.get('candles_count', 0)}")
+        return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
@@ -77,13 +83,87 @@ def test_add_asset():
             response_data = r.json()
             asset_id = response_data.get("asset", {}).get("id")
             s3_url = response_data.get("asset", {}).get("s3_url")
+            indexed = response_data.get("indexed", False)
             print(f"🆔 Asset ID: {asset_id}")
             print(f"🔗 S3 URL: {s3_url}")
+            print(f"🔍 Indexed for search: {indexed}")
         
         return success, asset_id
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False, None
+
+def test_add_similar_assets():
+    print_test("Add Similar Assets for Testing")
+    asset_ids = []
+    try:
+        # Add a weapon asset
+        weapon_data = {
+            "name": "Fire Sword",
+            "type": "weapon",
+            "author": "test_creator",
+            "description": "A flaming sword with magical properties",
+            "attributes": {
+                "damage": 50,
+                "fire_damage": 20,
+                "weight": 5
+            },
+            "tags": ["fire", "magic", "sword"],
+            "rarity": "epic",
+            "file_extension": "fbx"
+        }
+        
+        r = requests.post(f"{API_URL}/add", json=weapon_data)
+        if r.status_code == 200:
+            asset_ids.append(r.json().get("asset", {}).get("id"))
+            print(f"✅ Added Fire Sword")
+        
+        # Add another similar weapon
+        weapon_data2 = {
+            "name": "Ice Blade",
+            "type": "weapon",
+            "author": "test_creator",
+            "description": "A frozen blade with magical properties",
+            "attributes": {
+                "damage": 45,
+                "ice_damage": 25,
+                "weight": 4
+            },
+            "tags": ["ice", "magic", "sword"],
+            "rarity": "epic",
+            "file_extension": "fbx"
+        }
+        
+        r = requests.post(f"{API_URL}/add", json=weapon_data2)
+        if r.status_code == 200:
+            asset_ids.append(r.json().get("asset", {}).get("id"))
+            print(f"✅ Added Ice Blade")
+        
+        # Add a different type asset
+        armor_data = {
+            "name": "Dragon Scale Armor",
+            "type": "armor",
+            "author": "armor_smith",
+            "description": "Legendary armor made from dragon scales",
+            "attributes": {
+                "defense": 100,
+                "weight": 20,
+                "fire_resistance": 80
+            },
+            "tags": ["dragon", "legendary", "heavy"],
+            "rarity": "legendary",
+            "file_extension": "obj"
+        }
+        
+        r = requests.post(f"{API_URL}/add", json=armor_data)
+        if r.status_code == 200:
+            asset_ids.append(r.json().get("asset", {}).get("id"))
+            print(f"✅ Added Dragon Scale Armor")
+        
+        return len(asset_ids) == 3, asset_ids
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        return False, asset_ids
 
 def test_browse_with_assets():
     print_test("Browse Assets - After Adding (/browse)")
@@ -93,7 +173,7 @@ def test_browse_with_assets():
         if success:
             data = r.json()
             print(f"📊 Total assets: {data.get('total', 0)}")
-            for asset in data.get('assets', []):
+            for asset in data.get('assets', [])[:5]:  # Show first 5
                 status = "✅ Available" if asset.get('available') else f"❌ Checked out to {asset.get('borrower')}"
                 print(f"   - {asset.get('name')} ({asset.get('type')}) - {status}")
         return success
@@ -102,14 +182,58 @@ def test_browse_with_assets():
         return False
 
 def test_search():
-    print_test("Search Assets (/search)")
+    print_test("Search Assets - Text Mode (/search)")
     try:
         # Test text search
         r = requests.get(f"{API_URL}/search?q=test")
         success = print_result(r.status_code, 200, r.text)
         if success:
             data = r.json()
+            print(f"🔍 Search mode: {data.get('mode', 'text')}")
             print(f"🔍 Search results for 'test': {data.get('total_results', 0)}")
+        return success
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        return False
+
+def test_similarity_search():
+    print_test("Search Assets - Similarity Mode (/search?mode=similarity)")
+    try:
+        # Test similarity search for epic weapons
+        r = requests.get(f"{API_URL}/search?mode=similarity&type=weapon&rarity=epic&tags=magic")
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            print(f"🔍 Search mode: {data.get('mode', 'unknown')}")
+            print(f"🎯 Search steps: {data.get('search_steps', 0)}")
+            print(f"📊 Confidence: {data.get('confidence', 0):.2f}")
+            print(f"🔍 Similar assets found: {data.get('total_results', 0)}")
+            
+            for result in data.get('results', []):
+                print(f"   - {result.get('name')} ({result.get('type')}) - Rarity: {result.get('rarity')}")
+        return success
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        return False
+
+def test_find_similar(asset_id):
+    if not asset_id:
+        print("⏭️  Skipping find similar test - no asset ID")
+        return False
+        
+    print_test(f"Find Similar Assets (/similar?asset_id={asset_id})")
+    try:
+        r = requests.get(f"{API_URL}/similar?asset_id={asset_id}&limit=3")
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            ref_asset = data.get('reference_asset', {})
+            print(f"🎯 Reference: {ref_asset.get('name')} ({ref_asset.get('type')})")
+            print(f"🔍 Similar assets found:")
+            
+            for asset in data.get('similar_assets', []):
+                confidence = asset.get('similarity_confidence', 0)
+                print(f"   - {asset.get('name')} (Confidence: {confidence:.2f})")
         return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
@@ -181,32 +305,52 @@ def test_stats():
             print(f"📈 Total: {stats.get('total_assets', 0)}")
             print(f"📈 Available: {stats.get('available', 0)}")
             print(f"📈 Checked out: {stats.get('checked_out', 0)}")
+            
+            # Database stats
+            db_stats = stats.get('database_stats', {})
+            if db_stats:
+                print(f"🗄️  Database: {db_stats.get('status', 'unknown')}")
+                print(f"📊 Indexed items: {db_stats.get('candles_count', 0)}")
         return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
 def test_filtered_browse():
-    print_test("Browse with Filters (/browse?type=3d_models)")
+    print_test("Browse with Filters (/browse?type=weapon)")
     try:
-        r = requests.get(f"{API_URL}/browse?type=3d_models")
+        r = requests.get(f"{API_URL}/browse?type=weapon")
         success = print_result(r.status_code, 200, r.text)
         if success:
             data = r.json()
-            print(f"📊 3D Models found: {data.get('total', 0)}")
+            print(f"📊 Weapons found: {data.get('total', 0)}")
         return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return False
 
 def test_search_with_filters():
-    print_test("Search with Filters (/search?type=3d_models&rarity=uncommon)")
+    print_test("Search with Filters (/search?type=weapon&rarity=epic)")
     try:
-        r = requests.get(f"{API_URL}/search?type=3d_models&rarity=uncommon")
+        r = requests.get(f"{API_URL}/search?type=weapon&rarity=epic")
         success = print_result(r.status_code, 200, r.text)
         if success:
             data = r.json()
             print(f"🔍 Filtered results: {data.get('total_results', 0)}")
+        return success
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        return False
+
+def test_rebuild_index():
+    print_test("Rebuild Database Index (/rebuild-index)")
+    try:
+        r = requests.post(f"{API_URL}/rebuild-index")
+        success = print_result(r.status_code, 200, r.text)
+        if success:
+            data = r.json()
+            print(f"🔨 Total assets: {data.get('total_assets', 0)}")
+            print(f"✅ Indexed: {data.get('indexed', 0)}")
         return success
     except Exception as e:
         print(f"❌ ERROR: {e}")
@@ -232,21 +376,32 @@ def main():
         nonlocal tests_run, tests_passed
         tests_run += 1
         time.sleep(0.5)  # Brief pause between tests
-        if test_func(*args):
+        result = test_func(*args)
+        if result is True:
             tests_passed += 1
+        elif isinstance(result, tuple) and result[0] is True:
+            tests_passed += 1
+            return result[1] if len(result) > 1 else None
+        return result
     
     # Run all tests
     run_test(test_ping)
     run_test(test_browse_initial)
     
     # Add an asset and get its ID
-    success, asset_id = test_add_asset()
-    tests_run += 1
-    if success:
-        tests_passed += 1
+    asset_id = run_test(test_add_asset)
+    
+    # Add similar assets for similarity testing
+    asset_ids = run_test(test_add_similar_assets)
+    if isinstance(asset_ids, list) and len(asset_ids) > 0:
+        weapon_id = asset_ids[0]  # Fire Sword
+    else:
+        weapon_id = None
     
     run_test(test_browse_with_assets)
     run_test(test_search)
+    run_test(test_similarity_search)
+    run_test(test_find_similar, weapon_id)
     run_test(test_get_asset, asset_id)
     run_test(test_stats)
     run_test(test_filtered_browse)
@@ -257,6 +412,9 @@ def main():
     # Test browse again to see checked out status
     run_test(test_browse_with_assets)
     run_test(test_stats)
+    
+    # Test index rebuild
+    run_test(test_rebuild_index)
     
     # Final results
     print(f"\n{'='*60}")
@@ -269,7 +427,8 @@ def main():
     
     if tests_passed == tests_run:
         print("🎉 ALL TESTS PASSED!")
-        print("\n✨ Your Simple Asset Library is working perfectly!")
+        print("\n✨ Your Simple Asset Library with Ball-Tree Database is working perfectly!")
+        print("🔍 Similarity search is ready to help users find related assets!")
         sys.exit(0)
     else:
         print("⚠️  Some tests failed. Check the output above.")
