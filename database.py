@@ -3,455 +3,614 @@ import math
 import uuid
 import boto3
 from botocore.exceptions import ClientError
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Set, Callable
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class Database:
+
+class JSONDatabase:
+    """A generic S3-backed JSON database with configurable distance functions."""
+    
     def __init__(self, 
                  bucket: str = "mithrilmedia",
-                 prefix: str = "OpenGameAssetLibrary",
+                 prefix: str = "database",
+                 distance_method: str = "euclidean",
                  feature_dim: int = 8,
-                 candle_len: int = 12,
-                 initial_threshold: float = 0.6):
+                 index_size: int = 20,
+                 similarity_threshold: float = 0.1):
         """
-        Initialize S3-backed ball-tree database.
+        Initialize S3-backed JSON database with nearest neighbor search.
         
         Args:
             bucket: S3 bucket name
             prefix: S3 prefix for all database objects
-            feature_dim: Dimension of feature vectors
-            candle_len: Maximum number of candle entries
-            initial_threshold: Initial stopping criteria threshold
+            distance_method: Distance calculation method ("euclidean", "custom", or "auto")
+            feature_dim: Dimension for auto-generated feature vectors
+            index_size: Maximum number of indexed entries for fast search
+            similarity_threshold: Threshold for considering items similar (lower = more similar)
         """
         self.bucket = bucket
         self.prefix = prefix
-        self.assets_prefix = f"{prefix}/assets"
-        self.base_url = f"https://{bucket}.s3.us-east-1.amazonaws.com/{prefix}"
+        self.data_prefix = f"{prefix}/data"
         
         # Initialize S3 client
         self.s3_client = boto3.client('s3')
         
-        # Algorithm parameters
-        self.FEATURE_D = feature_dim
-        self.CANDLE_LEN = candle_len
-        self.initial_stopping_criteria = initial_threshold
-        self.stopping_criteria = self.initial_stopping_criteria
-        self.recursive_steps = 0
-        self.stopping_criteria_hits = 0
+        # Configuration
+        self.distance_method = distance_method
+        self.feature_dim = feature_dim
+        self.index_size = index_size
+        self.similarity_threshold = similarity_threshold
         
-        # Load or initialize candles
-        self.candles = self._load_candles()
+        # Load or initialize search index
+        self.search_index = self._load_index()
         
-    def _get_s3_key(self, key: str) -> str:
-        """Generate full S3 key with prefix."""
-        return f"{self.assets_prefix}/{key}.json"
+        # Statistics
+        self.last_search_stats = {}
     
-    def _get_candles_key(self) -> str:
-        """Get S3 key for candles index."""
-        return f"{self.prefix}/candles.json"
+    def _get_data_key(self, obj_id: str) -> str:
+        """Generate S3 key for data object."""
+        return f"{self.data_prefix}/{obj_id}.json"
     
-    def _load_candles(self) -> List[str]:
-        """Load candles index from S3."""
+    def _get_index_key(self) -> str:
+        """Get S3 key for search index."""
+        return f"{self.prefix}/index.json"
+    
+    def _load_index(self) -> List[str]:
+        """Load search index from S3."""
         try:
             response = self.s3_client.get_object(
                 Bucket=self.bucket,
-                Key=self._get_candles_key()
+                Key=self._get_index_key()
             )
-            candles_data = json.loads(response['Body'].read().decode('utf-8'))
-            return candles_data.get('candles', [])
+            index_data = json.loads(response['Body'].read().decode('utf-8'))
+            return index_data.get('index', [])
         except ClientError as e:
             if e.response['Error']['Code'] == 'NoSuchKey':
-                logger.info("No candles index found, creating new one")
+                logger.info("No index found, creating new one")
                 return []
-            else:
-                logger.error(f"Error loading candles: {e}")
-                return []
+            logger.error(f"Error loading index: {e}")
+            return []
     
-    def _save_candles(self):
-        """Save candles index to S3."""
+    def _save_index(self):
+        """Save search index to S3."""
         try:
-            candles_data = {'candles': self.candles}
+            index_data = {
+                'index': self.search_index,
+                'config': {
+                    'distance_method': self.distance_method,
+                    'feature_dim': self.feature_dim,
+                    'index_size': self.index_size
+                }
+            }
             self.s3_client.put_object(
                 Bucket=self.bucket,
-                Key=self._get_candles_key(),
-                Body=json.dumps(candles_data),
+                Key=self._get_index_key(),
+                Body=json.dumps(index_data),
                 ContentType='application/json'
             )
         except ClientError as e:
-            logger.error(f"Error saving candles: {e}")
+            logger.error(f"Error saving index: {e}")
     
-    def set(self, key: str, value: Dict[str, Any]) -> bool:
+    def _update_index(self, obj_id: str):
+        """Add object to search index if space available."""
+        if obj_id not in self.search_index:
+            if len(self.search_index) >= self.index_size:
+                # Remove oldest entry (FIFO)
+                self.search_index.pop(0)
+            self.search_index.append(obj_id)
+            self._save_index()
+    
+    # ============== Core Database Operations ==============
+    
+    def insert(self, data: Dict[str, Any], obj_id: Optional[str] = None) -> str:
         """
-        Store an object in S3.
+        Insert arbitrary JSON data into database.
         
         Args:
-            key: Unique identifier for the object
-            value: Dictionary containing the object data
+            data: Any JSON-serializable dictionary
+            obj_id: Optional ID (auto-generated if not provided)
             
         Returns:
-            True if successful, False otherwise
+            The object ID
         """
+        if obj_id is None:
+            obj_id = str(uuid.uuid4())
+        
+        # Auto-generate features if using euclidean distance
+        if self.distance_method == "euclidean" and "features" not in data:
+            data["features"] = self._extract_features(data)
+        
+        # Store the object ID within the data
+        data["_id"] = obj_id
+        
         try:
-            # Add to candles if space available
-            if len(self.candles) < self.CANDLE_LEN and key not in self.candles:
-                self.candles.append(key)
-                self._save_candles()
-            
-            # Store object in S3
-            s3_key = self._get_s3_key(key)
+            # Store in S3
             self.s3_client.put_object(
                 Bucket=self.bucket,
-                Key=s3_key,
-                Body=json.dumps(value),
-                ContentType='application/json',
-                Metadata={
-                    'entity-id': key,
-                    'feature-dim': str(self.FEATURE_D)
-                }
+                Key=self._get_data_key(obj_id),
+                Body=json.dumps(data),
+                ContentType='application/json'
             )
-            return True
+            
+            # Update search index
+            self._update_index(obj_id)
+            
+            logger.info(f"Inserted object: {obj_id}")
+            return obj_id
             
         except ClientError as e:
-            logger.error(f"Error storing object {key}: {e}")
-            return False
+            logger.error(f"Error inserting object: {e}")
+            raise
     
-    def get(self, key: str) -> Optional[Dict[str, Any]]:
+    def get(self, obj_id: str) -> Optional[Dict[str, Any]]:
         """
-        Retrieve an object from S3.
+        Retrieve JSON data by ID.
         
         Args:
-            key: Unique identifier for the object
+            obj_id: Object ID
             
         Returns:
-            Dictionary containing the object data, or None if not found
+            JSON data or None if not found
         """
         try:
-            s3_key = self._get_s3_key(key)
             response = self.s3_client.get_object(
                 Bucket=self.bucket,
-                Key=s3_key
+                Key=self._get_data_key(obj_id)
             )
             return json.loads(response['Body'].read().decode('utf-8'))
             
         except ClientError as e:
             if e.response['Error']['Code'] == 'NoSuchKey':
-                logger.debug(f"Object {key} not found")
-            else:
-                logger.error(f"Error retrieving object {key}: {e}")
+                logger.debug(f"Object not found: {obj_id}")
+                return None
+            logger.error(f"Error retrieving object: {e}")
             return None
     
-    def delete(self, key: str) -> bool:
+    def delete(self, obj_id: str) -> bool:
         """
-        Delete an object from S3.
+        Delete object from database.
         
         Args:
-            key: Unique identifier for the object
+            obj_id: Object ID
             
         Returns:
-            True if successful, False otherwise
+            True if successful
         """
         try:
-            s3_key = self._get_s3_key(key)
             self.s3_client.delete_object(
                 Bucket=self.bucket,
-                Key=s3_key
+                Key=self._get_data_key(obj_id)
             )
             
-            # Remove from candles if present
-            if key in self.candles:
-                self.candles.remove(key)
-                self._save_candles()
-                
+            # Remove from index
+            if obj_id in self.search_index:
+                self.search_index.remove(obj_id)
+                self._save_index()
+            
+            logger.info(f"Deleted object: {obj_id}")
             return True
             
         except ClientError as e:
-            logger.error(f"Error deleting object {key}: {e}")
+            logger.error(f"Error deleting object: {e}")
             return False
     
-    def distance_function(self, event: Dict[str, Any], db_event: Dict[str, Any]) -> Optional[float]:
+    def update(self, obj_id: str, data: Dict[str, Any]) -> bool:
         """
-        Calculate Euclidean distance between two feature vectors.
+        Update existing object.
         
         Args:
-            event: Query event with features
-            db_event: Database event with features
+            obj_id: Object ID
+            data: New data (completely replaces old data)
             
         Returns:
-            Euclidean distance or None if features missing
+            True if successful
         """
-        if not event or not db_event:
-            return None
-            
-        features1 = event.get("features")
-        features2 = db_event.get("features")
+        # Preserve the ID
+        data["_id"] = obj_id
         
-        if not features1 or not features2:
-            return None
-            
+        # Auto-generate features if needed
+        if self.distance_method == "euclidean" and "features" not in data:
+            data["features"] = self._extract_features(data)
+        
         try:
-            return math.sqrt(sum((features1[i] - features2[i])**2 
-                               for i in range(min(len(features1), len(features2)))))
-        except (IndexError, TypeError) as e:
-            logger.error(f"Error calculating distance: {e}")
-            return None
-    
-    def update_stopping_criteria(self, db_size: int, depth: int):
-        """
-        Dynamically adjust stopping criteria based on recursion depth and database size.
-        
-        Args:
-            db_size: Current database size
-            depth: Current recursion depth
-        """
-        self.stopping_criteria = self.initial_stopping_criteria + \
-                                (0.001 * depth * math.log(db_size + 1))
-    
-    def recursive_descent(self, 
-                         event: Dict[str, Any], 
-                         db_events_keys: List[str], 
-                         last_distances: Optional[List[Tuple[float, Dict]]], 
-                         depth: int = 0) -> Optional[Dict[str, Any]]:
-        """
-        Perform recursive descent to find nearest neighbor.
-        
-        Args:
-            event: Query event
-            db_events_keys: List of keys to search
-            last_distances: Previous iteration's distances
-            depth: Current recursion depth
+            self.s3_client.put_object(
+                Bucket=self.bucket,
+                Key=self._get_data_key(obj_id),
+                Body=json.dumps(data),
+                ContentType='application/json'
+            )
+            logger.info(f"Updated object: {obj_id}")
+            return True
             
-        Returns:
-            Best matching event or None
-        """
-        self.recursive_steps += 1
-        
-        if not db_events_keys:
-            return None
-            
-        # Fetch events from S3 (this is the expensive operation)
-        db_events = []
-        for key in db_events_keys:
-            db_event = self.get(str(key))
-            if db_event:
-                db_events.append(db_event)
-        
-        if not db_events:
-            return None
-        
-        # Calculate distances
-        distances = []
-        for db_event in db_events:
-            dist = self.distance_function(event, db_event)
-            if dist is not None:
-                distances.append((dist, db_event))
-        
-        if not distances:
-            return None
-        
-        # Sort by distance
-        distances.sort(key=lambda x: x[0])
-        
-        best_match = distances[0][1]
-        new_best_distance = distances[0][0]
-        
-        # Update dynamic stopping criteria
-        self.update_stopping_criteria(len(db_events_keys), depth)
-        
-        # Check stopping conditions
-        if new_best_distance < self.stopping_criteria:
-            self.stopping_criteria_hits += 1
-            return best_match
-        elif last_distances and new_best_distance > last_distances[0][0]:
-            # Distance is getting worse, return previous best
-            return event
-        else:
-            # Continue searching with nearest neighbors
-            num_neighbors_to_check = min(5 + depth, len(distances))
-            next_keys = []
-            
-            # Extract keys from the nearest neighbors
-            for _, db_event in distances[:num_neighbors_to_check]:
-                if 'id' in db_event:
-                    next_keys.append(db_event['id'])
-            
-            return self.recursive_descent(event, next_keys, distances, depth + 1)
-    
-    def get_by_event(self, event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], int]:
-        """
-        Find nearest neighbor for given event.
-        
-        Args:
-            event: Query event with features
-            
-        Returns:
-            Tuple of (best matching event, number of recursive steps)
-        """
-        self.recursive_steps = 0
-        self.stopping_criteria_hits = 0
-        result = self.recursive_descent(event, self.candles, last_distances=None)
-        return result, self.recursive_steps
-    
-    def insert_event(self, event: Dict[str, Any]) -> bool:
-        """
-        Insert event into database with automatic ID generation if needed.
-        
-        Args:
-            event: Event to insert (must have 'features' field)
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if 'id' not in event:
-            event['id'] = str(uuid.uuid4())
-        
-        if 'features' not in event:
-            logger.error("Event must have 'features' field")
+        except ClientError as e:
+            logger.error(f"Error updating object: {e}")
             return False
-        
-        success = self.set(event['id'], event)
-        
-        # Update candles to include this new event
-        if success and event['id'] not in self.candles:
-            if len(self.candles) >= self.CANDLE_LEN:
-                # Remove oldest candle
-                self.candles.pop(0)
-            self.candles.append(event['id'])
-            self._save_candles()
-        
-        return success
     
-    def list_all_keys(self, max_keys: int = 1000) -> List[str]:
+    # ============== Distance Functions ==============
+    
+    def calculate_distance(self, obj1: Dict[str, Any], obj2: Dict[str, Any]) -> float:
         """
-        List all asset keys in the database.
+        Calculate distance between two JSON objects using configured method.
         
         Args:
-            max_keys: Maximum number of keys to return
+            obj1: First JSON object
+            obj2: Second JSON object
             
         Returns:
-            List of asset keys
+            Distance score (lower = more similar)
         """
+        if self.distance_method == "euclidean":
+            return self._euclidean_distance(obj1, obj2)
+        elif self.distance_method == "custom":
+            return self._custom_json_distance(obj1, obj2)
+        elif self.distance_method == "auto":
+            # Try custom first, fall back to euclidean
+            try:
+                return self._custom_json_distance(obj1, obj2)
+            except:
+                return self._euclidean_distance(obj1, obj2)
+        else:
+            raise ValueError(f"Unknown distance method: {self.distance_method}")
+    
+    def _euclidean_distance(self, obj1: Dict[str, Any], obj2: Dict[str, Any]) -> float:
+        """
+        Calculate Euclidean distance using feature vectors.
+        
+        Args:
+            obj1: First object (with 'features' or auto-extracted)
+            obj2: Second object (with 'features' or auto-extracted)
+            
+        Returns:
+            Euclidean distance
+        """
+        # Get or generate features
+        features1 = obj1.get("features") or self._extract_features(obj1)
+        features2 = obj2.get("features") or self._extract_features(obj2)
+        
+        # Calculate Euclidean distance
+        min_len = min(len(features1), len(features2))
+        distance = math.sqrt(sum(
+            (features1[i] - features2[i])**2 
+            for i in range(min_len)
+        ))
+        
+        # Penalize different lengths
+        if len(features1) != len(features2):
+            distance += abs(len(features1) - len(features2)) * 0.1
+        
+        return distance
+    
+    def _custom_json_distance(self, obj1: Dict[str, Any], obj2: Dict[str, Any]) -> float:
+        """
+        Custom JSON-to-JSON distance function (TO BE IMPLEMENTED).
+        
+        This is a placeholder for a sophisticated JSON comparison that could:
+        - Compare nested structures
+        - Handle different data types intelligently
+        - Weight certain fields more than others
+        - Use semantic similarity for text fields
+        - Handle missing fields gracefully
+        
+        Args:
+            obj1: First JSON object
+            obj2: Second JSON object
+            
+        Returns:
+            Distance score (0 = identical, higher = more different)
+        """
+        # ===== STUB IMPLEMENTATION =====
+        # This is where we'll implement the custom JSON distance logic
+        
+        # For now, a simple implementation that counts differences
+        distance = 0.0
+        
+        # Get all keys from both objects
+        all_keys = set(obj1.keys()) | set(obj2.keys())
+        
+        for key in all_keys:
+            if key.startswith('_'):  # Skip internal fields
+                continue
+                
+            val1 = obj1.get(key)
+            val2 = obj2.get(key)
+            
+            # Missing field penalty
+            if val1 is None or val2 is None:
+                distance += 1.0
+                continue
+            
+            # Type mismatch penalty
+            if type(val1) != type(val2):
+                distance += 0.5
+                continue
+            
+            # Value comparison
+            if isinstance(val1, (int, float)):
+                # Numeric difference (normalized)
+                if val1 != 0 or val2 != 0:
+                    distance += abs(val1 - val2) / (abs(val1) + abs(val2) + 1)
+            elif isinstance(val1, str):
+                # String difference (simple)
+                if val1 != val2:
+                    distance += 1.0
+            elif isinstance(val1, bool):
+                if val1 != val2:
+                    distance += 0.5
+            elif isinstance(val1, dict):
+                # Recursive comparison (simplified)
+                distance += self._custom_json_distance(val1, val2) * 0.5
+            elif isinstance(val1, list):
+                # List comparison (simplified)
+                if len(val1) != len(val2):
+                    distance += abs(len(val1) - len(val2)) * 0.1
+                # Compare first few elements
+                for i in range(min(len(val1), len(val2), 3)):
+                    if val1[i] != val2[i]:
+                        distance += 0.2
+        
+        return distance
+        # ===== END STUB =====
+    
+    def _extract_features(self, obj: Dict[str, Any]) -> List[float]:
+        """
+        Auto-extract feature vector from arbitrary JSON.
+        
+        Args:
+            obj: JSON object
+            
+        Returns:
+            Feature vector of fixed dimension
+        """
+        features = []
+        
+        def extract_value(value):
+            """Extract numeric feature from any value type."""
+            if isinstance(value, (int, float)):
+                return float(value)
+            elif isinstance(value, str):
+                # Use hash for consistent conversion
+                return (hash(value) % 10000) / 10000
+            elif isinstance(value, bool):
+                return 1.0 if value else 0.0
+            elif isinstance(value, (dict, list)):
+                return len(value) / 100.0
+            else:
+                return 0.0
+        
+        # Extract features from all fields
+        for key in sorted(obj.keys()):
+            if key.startswith('_') or key == 'features':
+                continue
+            features.append(extract_value(obj[key]))
+        
+        # Pad or truncate to fixed dimension
+        while len(features) < self.feature_dim:
+            features.append(0.0)
+        
+        return features[:self.feature_dim]
+    
+    # ============== Search Operations ==============
+    
+    def find_similar(self, 
+                     query: Dict[str, Any], 
+                     max_results: int = 5,
+                     max_distance: Optional[float] = None) -> List[Tuple[str, Dict[str, Any], float]]:
+        """
+        Find similar objects using nearest neighbor search.
+        
+        Args:
+            query: Query object (can be partial)
+            max_results: Maximum number of results
+            max_distance: Maximum distance threshold (None = no limit)
+            
+        Returns:
+            List of (id, object, distance) tuples, sorted by distance
+        """
+        if max_distance is None:
+            max_distance = float('inf')
+        
+        # Reset statistics
+        self.last_search_stats = {
+            'objects_checked': 0,
+            'index_size': len(self.search_index)
+        }
+        
+        results = []
+        
+        # Check all indexed objects
+        for obj_id in self.search_index:
+            obj = self.get(obj_id)
+            if obj:
+                self.last_search_stats['objects_checked'] += 1
+                
+                # Calculate distance
+                distance = self.calculate_distance(query, obj)
+                
+                # Add if within threshold
+                if distance <= max_distance:
+                    results.append((obj_id, obj, distance))
+        
+        # Sort by distance and limit results
+        results.sort(key=lambda x: x[2])
+        return results[:max_results]
+    
+    def find_nearest(self, query: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any], float]]:
+        """
+        Find the single nearest neighbor.
+        
+        Args:
+            query: Query object
+            
+        Returns:
+            (id, object, distance) tuple or None if database is empty
+        """
+        results = self.find_similar(query, max_results=1)
+        return results[0] if results else None
+    
+    # ============== Utility Operations ==============
+    
+    def list_all(self, limit: int = 1000) -> List[str]:
+        """List all object IDs in database."""
         try:
             response = self.s3_client.list_objects_v2(
                 Bucket=self.bucket,
-                Prefix=self.assets_prefix,
-                MaxKeys=max_keys
+                Prefix=self.data_prefix,
+                MaxKeys=limit
             )
             
-            keys = []
+            ids = []
             if 'Contents' in response:
                 for obj in response['Contents']:
-                    # Extract key from S3 path
-                    full_key = obj['Key']
-                    if full_key.startswith(self.assets_prefix + '/') and full_key.endswith('.json'):
-                        key = full_key[len(self.assets_prefix) + 1:-5]  # Remove prefix and .json
-                        keys.append(key)
+                    key = obj['Key']
+                    if key.startswith(self.data_prefix + '/') and key.endswith('.json'):
+                        obj_id = key[len(self.data_prefix) + 1:-5]
+                        ids.append(obj_id)
             
-            return keys
+            return ids
             
         except ClientError as e:
-            logger.error(f"Error listing keys: {e}")
+            logger.error(f"Error listing objects: {e}")
             return []
     
-    def get_asset_url(self, key: str) -> str:
+    def get_stats(self) -> Dict[str, Any]:
+        """Get database statistics."""
+        all_ids = self.list_all(limit=10000)
+        
+        return {
+            'total_objects': len(all_ids),
+            'indexed_objects': len(self.search_index),
+            'index_coverage': len(self.search_index) / max(len(all_ids), 1),
+            'distance_method': self.distance_method,
+            'feature_dim': self.feature_dim,
+            'last_search_stats': self.last_search_stats
+        }
+    
+    def rebuild_index(self, sample_size: Optional[int] = None):
         """
-        Get the public URL for an asset.
+        Rebuild search index from all objects.
         
         Args:
-            key: Asset key
-            
-        Returns:
-            Public S3 URL for the asset
+            sample_size: If provided, randomly sample this many objects
         """
-        return f"{self.base_url}/assets/{key}.json"
-    
-    def batch_get(self, keys: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Retrieve multiple objects from S3.
+        all_ids = self.list_all(limit=10000)
         
-        Args:
-            keys: List of keys to retrieve
-            
-        Returns:
-            Dictionary mapping keys to their data
-        """
-        results = {}
-        for key in keys:
-            data = self.get(key)
-            if data:
-                results[key] = data
-        return results
-    
-    def health_check(self) -> Dict[str, Any]:
-        """
-        Perform health check on the database.
+        if sample_size and len(all_ids) > sample_size:
+            import random
+            all_ids = random.sample(all_ids, sample_size)
         
-        Returns:
-            Dictionary with health status information
-        """
-        try:
-            # Test S3 connectivity
-            self.s3_client.head_bucket(Bucket=self.bucket)
-            
-            # Get candles status
-            candles_count = len(self.candles)
-            
-            # Count total objects (limited check)
-            response = self.s3_client.list_objects_v2(
-                Bucket=self.bucket,
-                Prefix=self.assets_prefix,
-                MaxKeys=1
-            )
-            has_objects = 'Contents' in response and len(response['Contents']) > 0
-            
-            return {
-                'status': 'healthy',
-                'bucket': self.bucket,
-                'prefix': self.prefix,
-                'candles_count': candles_count,
-                'has_objects': has_objects,
-                'feature_dimension': self.FEATURE_D
-            }
-            
-        except ClientError as e:
-            return {
-                'status': 'unhealthy',
-                'error': str(e),
-                'bucket': self.bucket
-            }
+        self.search_index = all_ids[-self.index_size:]
+        self._save_index()
+        
+        logger.info(f"Rebuilt index with {len(self.search_index)} objects")
 
 
-# Helper function to convert arbitrary data to features
-def event_to_features(event: Dict[str, Any], feature_dim: int = 8) -> List[float]:
-    """
-    Convert event data to feature vector using hashing.
+# ============== Test Suite ==============
+
+def run_tests():
+    """Run comprehensive tests of the JSON database."""
+    print("=" * 60)
+    print("JSON DATABASE TEST SUITE")
+    print("=" * 60)
     
-    Args:
-        event: Event data
-        feature_dim: Target feature dimension
-        
-    Returns:
-        Feature vector
-    """
-    features = []
+    # Test 1: Basic Operations
+    print("\n1. Testing Basic Operations")
+    print("-" * 40)
     
-    for key, value in sorted(event.items()):
-        if key == 'features':  # Skip if already has features
-            continue
-            
-        if isinstance(value, (int, float)):
-            features.append(float(value))
-        elif isinstance(value, str):
-            # Hash string to number between 0 and 1
-            features.append((hash(value) % 1000) / 1000)
-        elif isinstance(value, bool):
-            features.append(1.0 if value else 0.0)
+    db = JSONDatabase(
+        bucket="mithrilmedia",
+        prefix="json-db-test",
+        distance_method="euclidean",
+        feature_dim=5,
+        index_size=10
+    )
     
-    # Pad or truncate to match feature dimension
-    while len(features) < feature_dim:
-        features.append(0.0)
+    # Insert various JSON objects
+    test_data = [
+        {"name": "Alice", "age": 30, "city": "New York", "score": 95},
+        {"name": "Bob", "age": 25, "city": "Los Angeles", "score": 87},
+        {"name": "Charlie", "age": 35, "city": "Chicago", "score": 92},
+        {"name": "Diana", "age": 28, "city": "New York", "score": 88},
+        {"product": "Laptop", "price": 999, "brand": "TechCo", "rating": 4.5},
+        {"product": "Phone", "price": 599, "brand": "Gadgets", "rating": 4.2},
+        {"type": "event", "timestamp": 1234567890, "action": "click", "user_id": 42},
+    ]
     
-    return features[:feature_dim]
+    inserted_ids = []
+    for data in test_data:
+        obj_id = db.insert(data)
+        inserted_ids.append(obj_id)
+        print(f"✓ Inserted: {obj_id[:8]}... -> {list(data.keys())}")
+    
+    # Test 2: Retrieval
+    print("\n2. Testing Retrieval")
+    print("-" * 40)
+    
+    for obj_id in inserted_ids[:3]:
+        obj = db.get(obj_id)
+        if obj:
+            print(f"✓ Retrieved: {obj_id[:8]}... -> {obj.get('name') or obj.get('product') or 'object'}")
+    
+    # Test 3: Euclidean Distance Search
+    print("\n3. Testing Euclidean Distance Search")
+    print("-" * 40)
+    
+    query = {"name": "Eve", "age": 29, "city": "New York", "score": 90}
+    results = db.find_similar(query, max_results=3)
+    
+    print(f"Query: {query}")
+    print(f"Results:")
+    for obj_id, obj, distance in results:
+        print(f"  {distance:.3f} -> {obj.get('name', obj.get('product', 'unknown'))}")
+    
+    # Test 4: Custom JSON Distance
+    print("\n4. Testing Custom JSON Distance")
+    print("-" * 40)
+    
+    db.distance_method = "custom"
+    
+    query2 = {"product": "Tablet", "price": 799, "brand": "TechCo", "rating": 4.3}
+    results2 = db.find_similar(query2, max_results=3)
+    
+    print(f"Query: {query2}")
+    print(f"Results:")
+    for obj_id, obj, distance in results2:
+        print(f"  {distance:.3f} -> {obj.get('name', obj.get('product', 'unknown'))}")
+    
+    # Test 5: Update
+    print("\n5. Testing Update")
+    print("-" * 40)
+    
+    if inserted_ids:
+        update_id = inserted_ids[0]
+        new_data = {"name": "Alice Updated", "age": 31, "city": "Boston", "score": 98}
+        success = db.update(update_id, new_data)
+        print(f"✓ Updated {update_id[:8]}... -> {new_data['name']}")
+    
+    # Test 6: Statistics
+    print("\n6. Database Statistics")
+    print("-" * 40)
+    
+    stats = db.get_stats()
+    for key, value in stats.items():
+        if key != 'last_search_stats':
+            print(f"  {key}: {value}")
+    
+    # Test 7: Cleanup
+    print("\n7. Cleanup")
+    print("-" * 40)
+    
+    for obj_id in inserted_ids:
+        db.delete(obj_id)
+    print(f"✓ Deleted {len(inserted_ids)} test objects")
+    
+    print("\n" + "=" * 60)
+    print("TESTS COMPLETED")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    run_tests()

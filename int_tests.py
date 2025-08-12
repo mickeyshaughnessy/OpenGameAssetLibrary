@@ -9,7 +9,7 @@ import json
 import time
 import sys
 
-API_URL = "http://127.0.0.1:5000"
+API_URL = "http://127.0.0.1:5070"
 
 def print_test(test_name):
     print(f"\n{'='*50}")

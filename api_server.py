@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple Asset Library API Server - S3 Version
-Manages a basic library of digital assets with S3 storage and checkout functionality
+Manages a basic library of digital assets with S3 storage
 """
 from flask import Flask
 from flask_cors import CORS
@@ -67,8 +67,6 @@ def init_library():
             "author": "System",
             "description": "A sample digital art collection for testing the S3-powered asset library",
             "available": True,
-            "borrower": None,
-            "checkout_date": None,
             "attributes": {
                 "file_size": "15MB",
                 "format": "PSD",
@@ -135,6 +133,8 @@ if __name__ == '__main__':
     print("  POST /add")
     print("  POST /checkout")
     print(f"\nS3 Storage: {S3_BASE_URL}")
-    print("Starting Flask server on http://127.0.0.1:5000")
+    print("\nStarting Flask server on port 5070...")
+    print("-" * 50)
     
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    # Start the Flask development server on port 5070
+    app.run(host='0.0.0.0', port=5070, debug=True)
