@@ -3,7 +3,7 @@
 Simple Asset Library API Server - S3 Version
 Manages a basic library of digital assets with S3 storage
 """
-from flask import Flask
+from flask import Flask, send_from_directory
 from flask_cors import CORS
 import json
 import uuid
@@ -11,6 +11,7 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import logging
+import os
 
 # Import handlers
 import handlers
@@ -103,6 +104,10 @@ def init_library():
 
 # Register all the handlers
 handlers.register(app)
+
+@app.route('/')
+def index():
+    return send_from_directory('.', 'index.html')
 
 @app.errorhandler(404)
 def not_found(error):

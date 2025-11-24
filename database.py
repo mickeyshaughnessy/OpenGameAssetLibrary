@@ -5,612 +5,381 @@ import boto3
 from botocore.exceptions import ClientError
 from typing import Dict, List, Tuple, Optional, Any, Set, Callable
 import logging
+import heapq
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class JSONDatabase:
-    """A generic S3-backed JSON database with configurable distance functions."""
+def json_distance(obj1: Any, obj2: Any) -> float:
+    """
+    Calculate distance between two arbitrary JSON objects.
+    Returns a value between 0.0 (identical) and 1.0 (completely different).
+    """
+    # 1. Type mismatch
+    if type(obj1) != type(obj2):
+        return 1.0
     
-    def __init__(self, 
-                 bucket: str = "mithrilmedia",
-                 prefix: str = "database",
-                 distance_method: str = "euclidean",
-                 feature_dim: int = 8,
-                 index_size: int = 20,
-                 similarity_threshold: float = 0.1):
-        """
-        Initialize S3-backed JSON database with nearest neighbor search.
+    # 2. None handling
+    if obj1 is None:
+        return 0.0 if obj2 is None else 1.0
+    
+    # 3. Dictionaries
+    if isinstance(obj1, dict):
+        keys1 = set(obj1.keys())
+        keys2 = set(obj2.keys())
+        all_keys = keys1 | keys2
         
-        Args:
-            bucket: S3 bucket name
-            prefix: S3 prefix for all database objects
-            distance_method: Distance calculation method ("euclidean", "custom", or "auto")
-            feature_dim: Dimension for auto-generated feature vectors
-            index_size: Maximum number of indexed entries for fast search
-            similarity_threshold: Threshold for considering items similar (lower = more similar)
+        if not all_keys:
+            return 0.0
+            
+        # Jaccard-like penalty for key mismatch
+        intersection = keys1 & keys2
+        union = keys1 | keys2
+        key_dist = 1.0 - (len(intersection) / len(union))
+        
+        # Recursive value distance for shared keys
+        val_dists = []
+        for k in all_keys:
+            # Skip metadata fields starting with _
+            if k.startswith('_'):
+                continue
+                
+            v1 = obj1.get(k)
+            v2 = obj2.get(k)
+            if v1 is not None and v2 is not None:
+                val_dists.append(json_distance(v1, v2))
+            else:
+                # One is missing -> max distance for this field
+                val_dists.append(1.0)
+        
+        if not val_dists:
+            return key_dist
+            
+        avg_val_dist = sum(val_dists) / len(val_dists)
+        
+        # Combine structural difference and value difference
+        return 0.4 * key_dist + 0.6 * avg_val_dist
+
+    # 4. Lists
+    if isinstance(obj1, list):
+        if not obj1 and not obj2:
+            return 0.0
+        if not obj1 or not obj2:
+            return 1.0
+            
+        # Length difference penalty
+        len_diff = abs(len(obj1) - len(obj2)) / max(len(obj1), len(obj2))
+        
+        # Compare first N elements (order matters for this simple version)
+        limit = min(len(obj1), len(obj2))
+        item_dists = []
+        for i in range(limit):
+            item_dists.append(json_distance(obj1[i], obj2[i]))
+            
+        avg_item_dist = sum(item_dists) / len(item_dists) if item_dists else 0.0
+        
+        return 0.3 * len_diff + 0.7 * avg_item_dist
+
+    # 5. Strings
+    if isinstance(obj1, str):
+        if obj1 == obj2:
+            return 0.0
+        # Simple case-insensitive containment or Levenshtein approximation
+        s1, s2 = obj1.lower(), obj2.lower()
+        if s1 == s2:
+            return 0.0
+        if s1 in s2 or s2 in s1:
+            return 0.3
+        return 1.0
+
+    # 6. Numbers
+    if isinstance(obj1, (int, float)):
+        if obj1 == obj2:
+            return 0.0
+        diff = abs(obj1 - obj2)
+        # Normalize by sum (avoid div by zero)
+        denom = abs(obj1) + abs(obj2)
+        if denom == 0:
+            return 0.0
+        return diff / denom
+
+    # 7. Booleans
+    if isinstance(obj1, bool):
+        return 0.0 if obj1 == obj2 else 1.0
+
+    return 1.0
+
+
+class BallTreeNode:
+    def __init__(self, centroid: Dict, radius: float, left=None, right=None, items: List[Dict] = None):
+        self.centroid = centroid
+        self.radius = radius
+        self.left = left
+        self.right = right
+        self.items = items or []  # Leaf nodes contain data items
+
+    def is_leaf(self):
+        return self.left is None and self.right is None
+
+    def to_dict(self):
+        """Serialize node to dictionary for JSON storage."""
+        return {
+            "centroid": self.centroid,
+            "radius": self.radius,
+            "is_leaf": self.is_leaf(),
+            "items": self.items if self.is_leaf() else [],
+            "left": self.left.to_dict() if self.left else None,
+            "right": self.right.to_dict() if self.right else None
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Deserialize node from dictionary."""
+        if not data:
+            return None
+        
+        node = cls(
+            centroid=data["centroid"],
+            radius=data["radius"],
+            items=data.get("items", [])
+        )
+        
+        if not data.get("is_leaf"):
+            node.left = cls.from_dict(data["left"])
+            node.right = cls.from_dict(data["right"])
+            
+        return node
+
+
+class BallTree:
+    def __init__(self, leaf_size=5):
+        self.root = None
+        self.leaf_size = leaf_size
+
+    def build(self, data_objects: List[Dict]):
+        """Build the tree from a list of JSON objects."""
+        if not data_objects:
+            self.root = None
+            return
+        self.root = self._build_recursive(data_objects)
+
+    def _build_recursive(self, objects: List[Dict]) -> BallTreeNode:
+        # Base case: Create leaf node
+        if len(objects) <= self.leaf_size:
+            # Pick the first object as representative centroid for the leaf
+            centroid = objects[0]
+            # Radius is max distance from centroid to any object in leaf
+            radius = max([json_distance(centroid, obj) for obj in objects]) if len(objects) > 1 else 0
+            return BallTreeNode(centroid=centroid, radius=radius, items=objects)
+
+        # Recursive step: Split data
+        # 1. Pick a random pivot A
+        pivot_a = random.choice(objects)
+        
+        # 2. Find pivot B (farthest from A)
+        pivot_b = max(objects, key=lambda o: json_distance(pivot_a, o))
+        
+        # 3. Find real pivot A (farthest from B) to maximize spread
+        pivot_a = max(objects, key=lambda o: json_distance(pivot_b, o))
+
+        # 4. Split objects based on closeness to A or B
+        set_a = []
+        set_b = []
+        
+        for obj in objects:
+            dist_a = json_distance(obj, pivot_a)
+            dist_b = json_distance(obj, pivot_b)
+            if dist_a < dist_b:
+                set_a.append(obj)
+            else:
+                set_b.append(obj)
+        
+        # Edge case: If all points are identical or split failed, force split
+        if not set_a or not set_b:
+            mid = len(objects) // 2
+            set_a = objects[:mid]
+            set_b = objects[mid:]
+
+        # 5. Create node
+        # Centroid is pivot_a (arbitrary choice, can be improved)
+        centroid = pivot_a
+        # Radius covers ALL points in this subtree
+        radius = max([json_distance(centroid, obj) for obj in objects])
+        
+        node = BallTreeNode(centroid=centroid, radius=radius)
+        node.left = self._build_recursive(set_a)
+        node.right = self._build_recursive(set_b)
+        
+        return node
+
+    def search(self, query: Dict, k: int = 5) -> List[Tuple[float, Dict]]:
         """
+        Search for k nearest neighbors.
+        Returns list of (distance, object).
+        """
+        if not self.root:
+            return []
+
+        # Priority queue to store (negative_distance, unique_id, object)
+        # We use unique_id as tiebreaker for non-comparable dicts
+        heap = [] 
+        
+        self._search_recursive(self.root, query, k, heap)
+        
+        # Convert back to positive distances and sort
+        # Heap items are (-d, id, item)
+        results = [(-t[0], t[2]) for t in heap]
+        results.sort(key=lambda x: x[0])
+        return results
+
+    def _search_recursive(self, node: BallTreeNode, query: Dict, k: int, heap: List):
+        # Distance from query to node centroid
+        dist_to_centroid = json_distance(query, node.centroid)
+        
+        # Pruning:
+        # If the heap is full (has k items), let 'worst_dist' be the largest distance in the heap.
+        # Lower bound distance to any point in this ball is (dist_to_centroid - node.radius).
+        # If (dist_to_centroid - node.radius) >= worst_dist, we can prune this node.
+        
+        worst_dist = -heap[0][0] if len(heap) == k else float('inf')
+        
+        if dist_to_centroid - node.radius >= worst_dist:
+            return
+
+        # If leaf, check all items
+        if node.is_leaf():
+            for item in node.items:
+                d = json_distance(query, item)
+                # Use id(item) as tiebreaker since dicts aren't comparable
+                entry = (-d, id(item), item)
+                
+                if len(heap) < k:
+                    heapq.heappush(heap, entry)
+                elif d < worst_dist:
+                    heapq.heappushpop(heap, entry)
+                    worst_dist = -heap[0][0]
+        else:
+            # Visit children. Order matters for performance: visit closer child first.
+            # Distance to left child's region vs right child's region isn't known perfectly without checking centroids
+            # But we can guess based on centroid distance? Actually, we just check both, but order helps pruning.
+            
+            # Simple heuristic: check distance to child centroids
+            dist_left = json_distance(query, node.left.centroid)
+            dist_right = json_distance(query, node.right.centroid)
+            
+            first, second = (node.left, node.right) if dist_left < dist_right else (node.right, node.left)
+            
+            self._search_recursive(first, query, k, heap)
+            
+            # Re-check pruning condition before visiting second child, as heap might have improved
+            worst_dist = -heap[0][0] if len(heap) == k else float('inf')
+            
+            # Triangle inequality check again for the second child
+            # (We do this inside the recursive call, but checking here saves a stack frame)
+            dist_to_second_centroid = dist_left if first == node.right else dist_right
+            radius_second = second.radius
+            
+            if dist_to_second_centroid - radius_second < worst_dist:
+                 self._search_recursive(second, query, k, heap)
+
+
+class JSONDatabase:
+    """S3-backed JSON database using Ball Tree indexing."""
+    
+    def __init__(self, bucket: str = "mithrilmedia", prefix: str = "OpenGameAssetLibrary"):
         self.bucket = bucket
         self.prefix = prefix
-        self.data_prefix = f"{prefix}/data"
-        
-        # Initialize S3 client
+        self.assets_prefix = f"{prefix}/assets"
+        self.index_key = f"{prefix}/index.json"
         self.s3_client = boto3.client('s3')
+        self.tree = BallTree()
         
-        # Configuration
-        self.distance_method = distance_method
-        self.feature_dim = feature_dim
-        self.index_size = index_size
-        self.similarity_threshold = similarity_threshold
-        
-        # Load or initialize search index
-        self.search_index = self._load_index()
-        
-        # Statistics
-        self.last_search_stats = {}
-    
-    def _get_data_key(self, obj_id: str) -> str:
-        """Generate S3 key for data object."""
-        return f"{self.data_prefix}/{obj_id}.json"
-    
-    def _get_index_key(self) -> str:
-        """Get S3 key for search index."""
-        return f"{self.prefix}/index.json"
-    
-    def _load_index(self) -> List[str]:
-        """Load search index from S3."""
+        # Try to load existing index
+        self.load_index()
+
+    def load_index(self):
+        """Load the Ball Tree index from S3."""
         try:
-            response = self.s3_client.get_object(
-                Bucket=self.bucket,
-                Key=self._get_index_key()
-            )
-            index_data = json.loads(response['Body'].read().decode('utf-8'))
-            return index_data.get('index', [])
+            response = self.s3_client.get_object(Bucket=self.bucket, Key=self.index_key)
+            data = json.loads(response['Body'].read().decode('utf-8'))
+            self.tree.root = BallTreeNode.from_dict(data)
+            logger.info("Index loaded successfully.")
         except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                logger.info("No index found, creating new one")
-                return []
-            logger.error(f"Error loading index: {e}")
-            return []
-    
-    def _save_index(self):
-        """Save search index to S3."""
+            logger.info(f"No existing index found or error loading: {e}")
+            self.tree.root = None
+
+    def save_index(self):
+        """Save the Ball Tree index to S3."""
+        if not self.tree.root:
+            return
         try:
-            index_data = {
-                'index': self.search_index,
-                'config': {
-                    'distance_method': self.distance_method,
-                    'feature_dim': self.feature_dim,
-                    'index_size': self.index_size
-                }
-            }
+            data = self.tree.root.to_dict()
             self.s3_client.put_object(
                 Bucket=self.bucket,
-                Key=self._get_index_key(),
-                Body=json.dumps(index_data),
+                Key=self.index_key,
+                Body=json.dumps(data),
                 ContentType='application/json'
             )
-        except ClientError as e:
+            logger.info("Index saved successfully.")
+        except Exception as e:
             logger.error(f"Error saving index: {e}")
-    
-    def _update_index(self, obj_id: str):
-        """Add object to search index if space available."""
-        if obj_id not in self.search_index:
-            if len(self.search_index) >= self.index_size:
-                # Remove oldest entry (FIFO)
-                self.search_index.pop(0)
-            self.search_index.append(obj_id)
-            self._save_index()
-    
-    # ============== Core Database Operations ==============
-    
-    def insert(self, data: Dict[str, Any], obj_id: Optional[str] = None) -> str:
-        """
-        Insert arbitrary JSON data into database.
-        
-        Args:
-            data: Any JSON-serializable dictionary
-            obj_id: Optional ID (auto-generated if not provided)
-            
-        Returns:
-            The object ID
-        """
-        if obj_id is None:
-            obj_id = str(uuid.uuid4())
-        
-        # Auto-generate features if using euclidean distance
-        if self.distance_method == "euclidean" and "features" not in data:
-            data["features"] = self._extract_features(data)
-        
-        # Store the object ID within the data
-        data["_id"] = obj_id
-        
+
+    def rebuild_index(self):
+        """Fetch all assets from S3 and rebuild the Ball Tree."""
+        logger.info("Rebuilding index from S3 assets...")
+        assets = []
         try:
-            # Store in S3
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=self.bucket, Prefix=self.assets_prefix)
+            
+            for page in pages:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        if key.endswith('.json'):
+                            # Fetch object body
+                            try:
+                                resp = self.s3_client.get_object(Bucket=self.bucket, Key=key)
+                                asset = json.loads(resp['Body'].read().decode('utf-8'))
+                                assets.append(asset)
+                            except Exception as err:
+                                logger.warning(f"Failed to read {key}: {err}")
+            
+            logger.info(f"Fetched {len(assets)} assets. Building tree...")
+            self.tree.build(assets)
+            self.save_index()
+            logger.info("Index rebuild complete.")
+            
+        except Exception as e:
+            logger.error(f"Error rebuilding index: {e}")
+
+    def insert(self, asset: Dict):
+        """Insert a new asset (updates S3 and local tree, saves index)."""
+        asset_id = asset.get("id") or str(uuid.uuid4())
+        asset["id"] = asset_id
+        
+        key = f"{self.assets_prefix}/{asset_id}.json"
+        try:
             self.s3_client.put_object(
                 Bucket=self.bucket,
-                Key=self._get_data_key(obj_id),
-                Body=json.dumps(data),
+                Key=key,
+                Body=json.dumps(asset, indent=2),
                 ContentType='application/json'
             )
-            
-            # Update search index
-            self._update_index(obj_id)
-            
-            logger.info(f"Inserted object: {obj_id}")
-            return obj_id
-            
-        except ClientError as e:
-            logger.error(f"Error inserting object: {e}")
+            # For a Ball Tree, insertion is complex (balancing). 
+            # For this demo, we'll just trigger a rebuild if it's small, 
+            # or lazily handle it. 
+            # Let's just rebuild for now as it ensures correctness.
+            # Optimization: In real world, we'd append to a buffer and batch rebuild.
+            self.rebuild_index()
+            return asset_id
+        except Exception as e:
+            logger.error(f"Error inserting asset: {e}")
             raise
-    
-    def get(self, obj_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve JSON data by ID.
-        
-        Args:
-            obj_id: Object ID
-            
-        Returns:
-            JSON data or None if not found
-        """
-        try:
-            response = self.s3_client.get_object(
-                Bucket=self.bucket,
-                Key=self._get_data_key(obj_id)
-            )
-            return json.loads(response['Body'].read().decode('utf-8'))
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                logger.debug(f"Object not found: {obj_id}")
-                return None
-            logger.error(f"Error retrieving object: {e}")
-            return None
-    
-    def delete(self, obj_id: str) -> bool:
-        """
-        Delete object from database.
-        
-        Args:
-            obj_id: Object ID
-            
-        Returns:
-            True if successful
-        """
-        try:
-            self.s3_client.delete_object(
-                Bucket=self.bucket,
-                Key=self._get_data_key(obj_id)
-            )
-            
-            # Remove from index
-            if obj_id in self.search_index:
-                self.search_index.remove(obj_id)
-                self._save_index()
-            
-            logger.info(f"Deleted object: {obj_id}")
-            return True
-            
-        except ClientError as e:
-            logger.error(f"Error deleting object: {e}")
-            return False
-    
-    def update(self, obj_id: str, data: Dict[str, Any]) -> bool:
-        """
-        Update existing object.
-        
-        Args:
-            obj_id: Object ID
-            data: New data (completely replaces old data)
-            
-        Returns:
-            True if successful
-        """
-        # Preserve the ID
-        data["_id"] = obj_id
-        
-        # Auto-generate features if needed
-        if self.distance_method == "euclidean" and "features" not in data:
-            data["features"] = self._extract_features(data)
-        
-        try:
-            self.s3_client.put_object(
-                Bucket=self.bucket,
-                Key=self._get_data_key(obj_id),
-                Body=json.dumps(data),
-                ContentType='application/json'
-            )
-            logger.info(f"Updated object: {obj_id}")
-            return True
-            
-        except ClientError as e:
-            logger.error(f"Error updating object: {e}")
-            return False
-    
-    # ============== Distance Functions ==============
-    
-    def calculate_distance(self, obj1: Dict[str, Any], obj2: Dict[str, Any]) -> float:
-        """
-        Calculate distance between two JSON objects using configured method.
-        
-        Args:
-            obj1: First JSON object
-            obj2: Second JSON object
-            
-        Returns:
-            Distance score (lower = more similar)
-        """
-        if self.distance_method == "euclidean":
-            return self._euclidean_distance(obj1, obj2)
-        elif self.distance_method == "custom":
-            return self._custom_json_distance(obj1, obj2)
-        elif self.distance_method == "auto":
-            # Try custom first, fall back to euclidean
-            try:
-                return self._custom_json_distance(obj1, obj2)
-            except:
-                return self._euclidean_distance(obj1, obj2)
-        else:
-            raise ValueError(f"Unknown distance method: {self.distance_method}")
-    
-    def _euclidean_distance(self, obj1: Dict[str, Any], obj2: Dict[str, Any]) -> float:
-        """
-        Calculate Euclidean distance using feature vectors.
-        
-        Args:
-            obj1: First object (with 'features' or auto-extracted)
-            obj2: Second object (with 'features' or auto-extracted)
-            
-        Returns:
-            Euclidean distance
-        """
-        # Get or generate features
-        features1 = obj1.get("features") or self._extract_features(obj1)
-        features2 = obj2.get("features") or self._extract_features(obj2)
-        
-        # Calculate Euclidean distance
-        min_len = min(len(features1), len(features2))
-        distance = math.sqrt(sum(
-            (features1[i] - features2[i])**2 
-            for i in range(min_len)
-        ))
-        
-        # Penalize different lengths
-        if len(features1) != len(features2):
-            distance += abs(len(features1) - len(features2)) * 0.1
-        
-        return distance
-    
-    def _custom_json_distance(self, obj1: Dict[str, Any], obj2: Dict[str, Any]) -> float:
-        """
-        Custom JSON-to-JSON distance function (TO BE IMPLEMENTED).
-        
-        This is a placeholder for a sophisticated JSON comparison that could:
-        - Compare nested structures
-        - Handle different data types intelligently
-        - Weight certain fields more than others
-        - Use semantic similarity for text fields
-        - Handle missing fields gracefully
-        
-        Args:
-            obj1: First JSON object
-            obj2: Second JSON object
-            
-        Returns:
-            Distance score (0 = identical, higher = more different)
-        """
-        # ===== STUB IMPLEMENTATION =====
-        # This is where we'll implement the custom JSON distance logic
-        
-        # For now, a simple implementation that counts differences
-        distance = 0.0
-        
-        # Get all keys from both objects
-        all_keys = set(obj1.keys()) | set(obj2.keys())
-        
-        for key in all_keys:
-            if key.startswith('_'):  # Skip internal fields
-                continue
-                
-            val1 = obj1.get(key)
-            val2 = obj2.get(key)
-            
-            # Missing field penalty
-            if val1 is None or val2 is None:
-                distance += 1.0
-                continue
-            
-            # Type mismatch penalty
-            if type(val1) != type(val2):
-                distance += 0.5
-                continue
-            
-            # Value comparison
-            if isinstance(val1, (int, float)):
-                # Numeric difference (normalized)
-                if val1 != 0 or val2 != 0:
-                    distance += abs(val1 - val2) / (abs(val1) + abs(val2) + 1)
-            elif isinstance(val1, str):
-                # String difference (simple)
-                if val1 != val2:
-                    distance += 1.0
-            elif isinstance(val1, bool):
-                if val1 != val2:
-                    distance += 0.5
-            elif isinstance(val1, dict):
-                # Recursive comparison (simplified)
-                distance += self._custom_json_distance(val1, val2) * 0.5
-            elif isinstance(val1, list):
-                # List comparison (simplified)
-                if len(val1) != len(val2):
-                    distance += abs(len(val1) - len(val2)) * 0.1
-                # Compare first few elements
-                for i in range(min(len(val1), len(val2), 3)):
-                    if val1[i] != val2[i]:
-                        distance += 0.2
-        
-        return distance
-        # ===== END STUB =====
-    
-    def _extract_features(self, obj: Dict[str, Any]) -> List[float]:
-        """
-        Auto-extract feature vector from arbitrary JSON.
-        
-        Args:
-            obj: JSON object
-            
-        Returns:
-            Feature vector of fixed dimension
-        """
-        features = []
-        
-        def extract_value(value):
-            """Extract numeric feature from any value type."""
-            if isinstance(value, (int, float)):
-                return float(value)
-            elif isinstance(value, str):
-                # Use hash for consistent conversion
-                return (hash(value) % 10000) / 10000
-            elif isinstance(value, bool):
-                return 1.0 if value else 0.0
-            elif isinstance(value, (dict, list)):
-                return len(value) / 100.0
-            else:
-                return 0.0
-        
-        # Extract features from all fields
-        for key in sorted(obj.keys()):
-            if key.startswith('_') or key == 'features':
-                continue
-            features.append(extract_value(obj[key]))
-        
-        # Pad or truncate to fixed dimension
-        while len(features) < self.feature_dim:
-            features.append(0.0)
-        
-        return features[:self.feature_dim]
-    
-    # ============== Search Operations ==============
-    
-    def find_similar(self, 
-                     query: Dict[str, Any], 
-                     max_results: int = 5,
-                     max_distance: Optional[float] = None) -> List[Tuple[str, Dict[str, Any], float]]:
-        """
-        Find similar objects using nearest neighbor search.
-        
-        Args:
-            query: Query object (can be partial)
-            max_results: Maximum number of results
-            max_distance: Maximum distance threshold (None = no limit)
-            
-        Returns:
-            List of (id, object, distance) tuples, sorted by distance
-        """
-        if max_distance is None:
-            max_distance = float('inf')
-        
-        # Reset statistics
-        self.last_search_stats = {
-            'objects_checked': 0,
-            'index_size': len(self.search_index)
-        }
-        
-        results = []
-        
-        # Check all indexed objects
-        for obj_id in self.search_index:
-            obj = self.get(obj_id)
-            if obj:
-                self.last_search_stats['objects_checked'] += 1
-                
-                # Calculate distance
-                distance = self.calculate_distance(query, obj)
-                
-                # Add if within threshold
-                if distance <= max_distance:
-                    results.append((obj_id, obj, distance))
-        
-        # Sort by distance and limit results
-        results.sort(key=lambda x: x[2])
-        return results[:max_results]
-    
-    def find_nearest(self, query: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any], float]]:
-        """
-        Find the single nearest neighbor.
-        
-        Args:
-            query: Query object
-            
-        Returns:
-            (id, object, distance) tuple or None if database is empty
-        """
-        results = self.find_similar(query, max_results=1)
-        return results[0] if results else None
-    
-    # ============== Utility Operations ==============
-    
-    def list_all(self, limit: int = 1000) -> List[str]:
-        """List all object IDs in database."""
-        try:
-            response = self.s3_client.list_objects_v2(
-                Bucket=self.bucket,
-                Prefix=self.data_prefix,
-                MaxKeys=limit
-            )
-            
-            ids = []
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    key = obj['Key']
-                    if key.startswith(self.data_prefix + '/') and key.endswith('.json'):
-                        obj_id = key[len(self.data_prefix) + 1:-5]
-                        ids.append(obj_id)
-            
-            return ids
-            
-        except ClientError as e:
-            logger.error(f"Error listing objects: {e}")
-            return []
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get database statistics."""
-        all_ids = self.list_all(limit=10000)
-        
-        return {
-            'total_objects': len(all_ids),
-            'indexed_objects': len(self.search_index),
-            'index_coverage': len(self.search_index) / max(len(all_ids), 1),
-            'distance_method': self.distance_method,
-            'feature_dim': self.feature_dim,
-            'last_search_stats': self.last_search_stats
-        }
-    
-    def rebuild_index(self, sample_size: Optional[int] = None):
-        """
-        Rebuild search index from all objects.
-        
-        Args:
-            sample_size: If provided, randomly sample this many objects
-        """
-        all_ids = self.list_all(limit=10000)
-        
-        if sample_size and len(all_ids) > sample_size:
-            import random
-            all_ids = random.sample(all_ids, sample_size)
-        
-        self.search_index = all_ids[-self.index_size:]
-        self._save_index()
-        
-        logger.info(f"Rebuilt index with {len(self.search_index)} objects")
 
-
-# ============== Test Suite ==============
-
-def run_tests():
-    """Run comprehensive tests of the JSON database."""
-    print("=" * 60)
-    print("JSON DATABASE TEST SUITE")
-    print("=" * 60)
-    
-    # Test 1: Basic Operations
-    print("\n1. Testing Basic Operations")
-    print("-" * 40)
-    
-    db = JSONDatabase(
-        bucket="mithrilmedia",
-        prefix="json-db-test",
-        distance_method="euclidean",
-        feature_dim=5,
-        index_size=10
-    )
-    
-    # Insert various JSON objects
-    test_data = [
-        {"name": "Alice", "age": 30, "city": "New York", "score": 95},
-        {"name": "Bob", "age": 25, "city": "Los Angeles", "score": 87},
-        {"name": "Charlie", "age": 35, "city": "Chicago", "score": 92},
-        {"name": "Diana", "age": 28, "city": "New York", "score": 88},
-        {"product": "Laptop", "price": 999, "brand": "TechCo", "rating": 4.5},
-        {"product": "Phone", "price": 599, "brand": "Gadgets", "rating": 4.2},
-        {"type": "event", "timestamp": 1234567890, "action": "click", "user_id": 42},
-    ]
-    
-    inserted_ids = []
-    for data in test_data:
-        obj_id = db.insert(data)
-        inserted_ids.append(obj_id)
-        print(f"✓ Inserted: {obj_id[:8]}... -> {list(data.keys())}")
-    
-    # Test 2: Retrieval
-    print("\n2. Testing Retrieval")
-    print("-" * 40)
-    
-    for obj_id in inserted_ids[:3]:
-        obj = db.get(obj_id)
-        if obj:
-            print(f"✓ Retrieved: {obj_id[:8]}... -> {obj.get('name') or obj.get('product') or 'object'}")
-    
-    # Test 3: Euclidean Distance Search
-    print("\n3. Testing Euclidean Distance Search")
-    print("-" * 40)
-    
-    query = {"name": "Eve", "age": 29, "city": "New York", "score": 90}
-    results = db.find_similar(query, max_results=3)
-    
-    print(f"Query: {query}")
-    print(f"Results:")
-    for obj_id, obj, distance in results:
-        print(f"  {distance:.3f} -> {obj.get('name', obj.get('product', 'unknown'))}")
-    
-    # Test 4: Custom JSON Distance
-    print("\n4. Testing Custom JSON Distance")
-    print("-" * 40)
-    
-    db.distance_method = "custom"
-    
-    query2 = {"product": "Tablet", "price": 799, "brand": "TechCo", "rating": 4.3}
-    results2 = db.find_similar(query2, max_results=3)
-    
-    print(f"Query: {query2}")
-    print(f"Results:")
-    for obj_id, obj, distance in results2:
-        print(f"  {distance:.3f} -> {obj.get('name', obj.get('product', 'unknown'))}")
-    
-    # Test 5: Update
-    print("\n5. Testing Update")
-    print("-" * 40)
-    
-    if inserted_ids:
-        update_id = inserted_ids[0]
-        new_data = {"name": "Alice Updated", "age": 31, "city": "Boston", "score": 98}
-        success = db.update(update_id, new_data)
-        print(f"✓ Updated {update_id[:8]}... -> {new_data['name']}")
-    
-    # Test 6: Statistics
-    print("\n6. Database Statistics")
-    print("-" * 40)
-    
-    stats = db.get_stats()
-    for key, value in stats.items():
-        if key != 'last_search_stats':
-            print(f"  {key}: {value}")
-    
-    # Test 7: Cleanup
-    print("\n7. Cleanup")
-    print("-" * 40)
-    
-    for obj_id in inserted_ids:
-        db.delete(obj_id)
-    print(f"✓ Deleted {len(inserted_ids)} test objects")
-    
-    print("\n" + "=" * 60)
-    print("TESTS COMPLETED")
-    print("=" * 60)
-
-
-if __name__ == "__main__":
-    run_tests()
+    def search(self, query: Dict, k: int = 5):
+        """Search for similar assets."""
+        return self.tree.search(query, k)

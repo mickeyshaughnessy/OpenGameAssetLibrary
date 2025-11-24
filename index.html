@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenGameAssetLibrary - Intelligent Demo</title>
+    <style>
+        :root {
+            --primary: #2c3e50;
+            --secondary: #3498db;
+            --accent: #e74c3c;
+            --light: #ecf0f1;
+            --dark: #2c3e50;
+            --success: #27ae60;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+        header {
+            background-color: var(--primary);
+            color: white;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        h1 { margin: 0; font-size: 1.5rem; }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+        .full-width { grid-column: 1 / -1; }
+        
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            padding: 1.5rem;
+        }
+        .card h2 { margin-top: 0; color: var(--primary); border-bottom: 2px solid var(--light); padding-bottom: 0.5rem; }
+        
+        button {
+            background-color: var(--secondary);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #2980b9; }
+        button.accent { background-color: var(--accent); }
+        button.accent:hover { background-color: #c0392b; }
+        button.success { background-color: var(--success); }
+        
+        .query-box {
+            background-color: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .query-box:hover { border-color: var(--secondary); transform: translateY(-2px); }
+        .query-box h3 { margin: 0 0 0.5rem 0; font-size: 1.1rem; }
+        .query-box p { margin: 0; color: #666; font-size: 0.9rem; }
+        
+        pre {
+            background-color: #2d3436;
+            color: #a29bfe;
+            padding: 1rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.9rem;
+        }
+        
+        .result-item {
+            border-left: 4px solid var(--secondary);
+            background: #fff;
+            margin-bottom: 0.5rem;
+            padding: 0.5rem 1rem;
+        }
+        .score { float: right; font-weight: bold; color: var(--success); }
+        
+        #status {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            background: #333;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            display: none;
+        }
+        
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>OpenGameAssetLibrary Demo</h1>
+    <div>
+        <span id="connection-status">Checking API...</span>
+    </div>
+</header>
+
+<div class="container">
+    <!-- Setup Section -->
+    <div class="card full-width">
+        <h2>1. Library Setup</h2>
+        <p>Initialize the database with the demo dataset (Dungeon Crawler & Farming Sim assets).</p>
+        <button class="success" onclick="initializeLibrary()">Inject Demo Assets</button>
+        <span id="init-msg" style="margin-left: 1rem; color: #666;"></span>
+    </div>
+
+    <!-- Query Selection -->
+    <div class="card">
+        <h2>2. Select a Semantic Query</h2>
+        <p>Click a query to run it against the Ball Tree index.</p>
+        
+        <div class="query-box" onclick="runQuery(0)">
+            <h3>Find a Warrior (Combat Focus)</h3>
+            <p>Targeting a high-strength character in the dungeon crawler set.</p>
+        </div>
+        
+        <div class="query-box" onclick="runQuery(1)">
+            <h3>Find a Farm Animal</h3>
+            <p>Looking for a milk-producing animal in the farming sim.</p>
+        </div>
+        
+        <div class="query-box" onclick="runQuery(2)">
+            <h3>Find Weather</h3>
+            <p>Searching for weather conditions, specifically rain.</p>
+        </div>
+        
+        <div class="query-box" onclick="runQuery(3)">
+            <h3>Find High Intellect NPC (Vague)</h3>
+            <p>Cross-genre search for high intelligence. Should find the Mage.</p>
+        </div>
+    </div>
+
+    <!-- Results Display -->
+    <div class="card">
+        <h2>3. Search Results</h2>
+        <div id="query-display" class="hidden">
+            <strong>Query JSON:</strong>
+            <pre id="query-json">{}</pre>
+        </div>
+        <div id="results-list">
+            <p style="color:#999; font-style:italic;">Select a query to see results here...</p>
+        </div>
+    </div>
+    
+    <!-- Asset Browser -->
+    <div class="card full-width">
+        <h2>Current Assets in Library</h2>
+        <button onclick="loadAssets()">Refresh List</button>
+        <div id="asset-grid" style="margin-top:1rem; display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:1rem;">
+            <!-- Assets will populate here -->
+        </div>
+    </div>
+</div>
+
+<div id="status"></div>
+
+<script>
+    const API_URL = window.location.origin;
+
+    // --- Demo Data Definition ---
+    const DEMO_ASSETS = [
+        {
+            "name": "Garroth Ironhewer", "game_type": "dungeon_crawler", "category": "character", "role": "warrior",
+            "stats": {"strength": 18, "dexterity": 12, "intelligence": 8},
+            "inventory": ["Greatsword", "Plate Armor", "Health Potion"], "description": "A battle-hardened veteran."
+        },
+        {
+            "name": "Elara Moonwhisper", "game_type": "dungeon_crawler", "category": "character", "role": "mage",
+            "stats": {"strength": 6, "dexterity": 14, "intelligence": 19},
+            "inventory": ["Elder Staff", "Silk Robes", "Mana Crystal"], "description": "A scholar of the arcane."
+        },
+        {
+            "name": "Varin Shadowstep", "game_type": "dungeon_crawler", "category": "character", "role": "rogue",
+            "stats": {"strength": 10, "dexterity": 20, "intelligence": 14},
+            "inventory": ["Daggers", "Leather Armor"], "description": "A silent blade in the dark."
+        },
+        {
+            "name": "Barnaby Smith", "game_type": "dungeon_crawler", "category": "npc", "role": "blacksmith",
+            "location": "Town Square", "services": ["repair", "sell_weapons"]
+        },
+        {
+            "name": "Bessie", "game_type": "farming_sim", "category": "animal", "species": "cow",
+            "produce": "milk", "value": 500, "needs": ["hay", "water"]
+        },
+        {
+            "name": "Cluck", "game_type": "farming_sim", "category": "animal", "species": "chicken",
+            "produce": "eggs", "value": 50, "needs": ["seeds"]
+        },
+        {
+            "name": "Golden Wheat", "game_type": "farming_sim", "category": "plant", "species": "wheat",
+            "growth_days": 5, "seasons": ["spring", "summer"], "sell_price": 10
+        },
+        {
+            "name": "Sunny Day", "game_type": "farming_sim", "category": "weather", "condition": "sunny",
+            "effects": {"crop_growth": 1.2}, "description": "Clear blue skies."
+        },
+        {
+            "name": "Heavy Rain", "game_type": "farming_sim", "category": "weather", "condition": "rain",
+            "effects": {"crop_growth": 1.5, "water_crops": true}, "description": "A thorough soaking."
+        }
+    ];
+
+    const QUERIES = [
+        {
+            "game_type": "dungeon_crawler", "category": "character", "role": "warrior",
+            "stats": {"strength": 20}
+        },
+        {
+            "game_type": "farming_sim", "category": "animal", "produce": "milk"
+        },
+        {
+            "category": "weather", "condition": "rain"
+        },
+        {
+            "stats": {"intelligence": 18}
+        }
+    ];
+
+    // --- Functions ---
+
+    async function checkHealth() {
+        try {
+            const res = await fetch(`${API_URL}/ping`);
+            const data = await res.json();
+            document.getElementById('connection-status').innerText = `API: ${data.status} (v${data.version})`;
+            document.getElementById('connection-status').style.color = '#2ecc71';
+        } catch (e) {
+            document.getElementById('connection-status').innerText = 'API Disconnected';
+            document.getElementById('connection-status').style.color = '#e74c3c';
+        }
+    }
+
+    async function initializeLibrary() {
+        const msg = document.getElementById('init-msg');
+        msg.innerText = "Injecting assets...";
+        
+        let count = 0;
+        for (const asset of DEMO_ASSETS) {
+            try {
+                await fetch(`${API_URL}/add`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(asset)
+                });
+                count++;
+                msg.innerText = `Injected ${count}/${DEMO_ASSETS.length}...`;
+            } catch (e) {
+                console.error("Failed to add asset", asset.name, e);
+            }
+        }
+        msg.innerText = "Done! Library initialized.";
+        loadAssets();
+    }
+
+    async function loadAssets() {
+        const grid = document.getElementById('asset-grid');
+        grid.innerHTML = "Loading...";
+        try {
+            const res = await fetch(`${API_URL}/browse`);
+            const data = await res.json();
+            
+            grid.innerHTML = "";
+            data.assets.forEach(asset => {
+                const div = document.createElement('div');
+                div.className = 'card';
+                div.style.padding = '1rem';
+                div.style.boxShadow = 'none';
+                div.style.border = '1px solid #eee';
+                div.innerHTML = `<strong>${asset.name}</strong><br><small>${asset.type || asset.category}</small>`;
+                grid.appendChild(div);
+            });
+        } catch (e) {
+            grid.innerHTML = "Error loading assets.";
+        }
+    }
+
+    async function runQuery(index) {
+        const query = QUERIES[index];
+        
+        // Show query
+        document.getElementById('query-display').classList.remove('hidden');
+        document.getElementById('query-json').innerText = JSON.stringify(query, null, 2);
+        
+        const resultsDiv = document.getElementById('results-list');
+        resultsDiv.innerHTML = "Searching...";
+        
+        try {
+            const res = await fetch(`${API_URL}/search?k=3`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(query)
+            });
+            const data = await res.json();
+            
+            resultsDiv.innerHTML = "";
+            if (data.results && data.results.length > 0) {
+                data.results.forEach(item => {
+                    const div = document.createElement('div');
+                    div.className = 'result-item';
+                    // Calculate percentage score for display
+                    const score = Math.round(item.similarity_score * 100);
+                    
+                    div.innerHTML = `
+                        <span class="score">${score}% Match</span>
+                        <strong>${item.asset.name}</strong>
+                        <br>
+                        <small>${item.asset.category || ''} / ${item.asset.role || item.asset.species || ''}</small>
+                        <br>
+                        <small style="color:#666;">Distance: ${item.distance.toFixed(4)}</small>
+                    `;
+                    resultsDiv.appendChild(div);
+                });
+            } else {
+                resultsDiv.innerHTML = "No results found.";
+            }
+        } catch (e) {
+            resultsDiv.innerHTML = "Error executing search.";
+            console.error(e);
+        }
+    }
+
+    // Init
+    checkHealth();
+    loadAssets();
+
+</script>
+
+</body>
+</html>
