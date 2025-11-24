@@ -151,9 +151,20 @@
         </div>
     </div>
 
+    <!-- Custom Query -->
+    <div class="card">
+        <h2>3. Custom Query</h2>
+        <p>Enter a JSON query object to search the library.</p>
+        <textarea id="custom-query-input" rows="6" style="width: 100%; padding: 0.5rem; font-family: monospace; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 1rem;">{
+  "game_type": "dungeon_crawler",
+  "role": "warrior"
+}</textarea>
+        <button class="secondary" onclick="runCustomQuery()">Run Custom Search</button>
+    </div>
+
     <!-- Results Display -->
     <div class="card">
-        <h2>3. Search Results</h2>
+        <h2>4. Search Results</h2>
         <div id="query-display" class="hidden">
             <strong>Query JSON:</strong>
             <pre id="query-json">{}</pre>
@@ -175,51 +186,12 @@
 
 <div id="status"></div>
 
+<script src="assets.js"></script>
 <script>
     const API_URL = window.location.origin;
 
     // --- Demo Data Definition ---
-    const DEMO_ASSETS = [
-        {
-            "name": "Garroth Ironhewer", "game_type": "dungeon_crawler", "category": "character", "role": "warrior",
-            "stats": {"strength": 18, "dexterity": 12, "intelligence": 8},
-            "inventory": ["Greatsword", "Plate Armor", "Health Potion"], "description": "A battle-hardened veteran."
-        },
-        {
-            "name": "Elara Moonwhisper", "game_type": "dungeon_crawler", "category": "character", "role": "mage",
-            "stats": {"strength": 6, "dexterity": 14, "intelligence": 19},
-            "inventory": ["Elder Staff", "Silk Robes", "Mana Crystal"], "description": "A scholar of the arcane."
-        },
-        {
-            "name": "Varin Shadowstep", "game_type": "dungeon_crawler", "category": "character", "role": "rogue",
-            "stats": {"strength": 10, "dexterity": 20, "intelligence": 14},
-            "inventory": ["Daggers", "Leather Armor"], "description": "A silent blade in the dark."
-        },
-        {
-            "name": "Barnaby Smith", "game_type": "dungeon_crawler", "category": "npc", "role": "blacksmith",
-            "location": "Town Square", "services": ["repair", "sell_weapons"]
-        },
-        {
-            "name": "Bessie", "game_type": "farming_sim", "category": "animal", "species": "cow",
-            "produce": "milk", "value": 500, "needs": ["hay", "water"]
-        },
-        {
-            "name": "Cluck", "game_type": "farming_sim", "category": "animal", "species": "chicken",
-            "produce": "eggs", "value": 50, "needs": ["seeds"]
-        },
-        {
-            "name": "Golden Wheat", "game_type": "farming_sim", "category": "plant", "species": "wheat",
-            "growth_days": 5, "seasons": ["spring", "summer"], "sell_price": 10
-        },
-        {
-            "name": "Sunny Day", "game_type": "farming_sim", "category": "weather", "condition": "sunny",
-            "effects": {"crop_growth": 1.2}, "description": "Clear blue skies."
-        },
-        {
-            "name": "Heavy Rain", "game_type": "farming_sim", "category": "weather", "condition": "rain",
-            "effects": {"crop_growth": 1.5, "water_crops": true}, "description": "A thorough soaking."
-        }
-    ];
+    // DEMO_ASSETS is loaded from assets.js
 
     const QUERIES = [
         {
@@ -297,7 +269,20 @@
 
     async function runQuery(index) {
         const query = QUERIES[index];
-        
+        executeSearch(query);
+    }
+
+    async function runCustomQuery() {
+        const input = document.getElementById('custom-query-input').value;
+        try {
+            const query = JSON.parse(input);
+            executeSearch(query);
+        } catch (e) {
+            alert("Invalid JSON format!");
+        }
+    }
+
+    async function executeSearch(query) {
         // Show query
         document.getElementById('query-display').classList.remove('hidden');
         document.getElementById('query-json').innerText = JSON.stringify(query, null, 2);
