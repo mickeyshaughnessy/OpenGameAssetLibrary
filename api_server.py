@@ -109,6 +109,12 @@ handlers.register(app)
 def index():
     return send_from_directory('.', 'index.html')
 
+@app.route('/<path:filename>')
+def serve_static(filename):
+    if filename.endswith('.js'):
+        return send_from_directory('.', filename)
+    return {"error": "File not found"}, 404
+
 @app.errorhandler(404)
 def not_found(error):
     return {"error": "Endpoint not found"}, 404
@@ -136,6 +142,7 @@ if __name__ == '__main__':
     print("  GET  /stats")
     print("  GET  /asset/<asset_id>")
     print("  POST /add")
+    print("  POST /add_batch")
     print("  POST /checkout")
     print(f"\nS3 Storage: {S3_BASE_URL}")
     print("\nStarting Flask server on port 5070...")

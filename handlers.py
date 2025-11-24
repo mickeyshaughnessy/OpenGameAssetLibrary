@@ -154,6 +154,21 @@ def add_asset():
     except Exception as e:
         return jsonify({"error": f"Failed to add asset: {str(e)}"}), 500
 
+def add_assets_batch():
+    """Add multiple assets to the library"""
+    data = request.json
+    if not data or not isinstance(data, list):
+        return jsonify({"error": "No JSON list provided"}), 400
+    
+    try:
+        asset_ids = db.insert_many(data)
+        return jsonify({
+            "message": f"Successfully added {len(asset_ids)} assets", 
+            "ids": asset_ids
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to add assets: {str(e)}"}), 500
+
 # ... keep checkout and stats as they are mostly independent ...
 def checkout():
     """Check out an asset from the library (non-exclusive - multiple users can checkout)"""
@@ -225,6 +240,7 @@ def register(app):
     app.route('/browse', methods=['GET'])(browse)
     app.route('/search', methods=['GET', 'POST'])(search) # Added POST for JSON search
     app.route('/add', methods=['POST'])(add_asset)
+    app.route('/add_batch', methods=['POST'])(add_assets_batch)
     app.route('/checkout', methods=['POST'])(checkout)
     app.route('/asset/<asset_id>', methods=['GET'])(get_asset)
     app.route('/stats', methods=['GET'])(library_stats)

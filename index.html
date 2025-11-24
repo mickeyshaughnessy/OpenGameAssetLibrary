@@ -3,331 +3,605 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenGameAssetLibrary - Intelligent Demo</title>
+    <title>Dungeon Crawler - OpenGameAssetLibrary</title>
     <style>
         :root {
             --primary: #2c3e50;
-            --secondary: #3498db;
-            --accent: #e74c3c;
-            --light: #ecf0f1;
-            --dark: #2c3e50;
+            --secondary: #e74c3c;
+            --bg: #1a1a1a;
+            --panel: #2d2d2d;
+            --text: #ecf0f1;
+            --accent: #f1c40f;
             --success: #27ae60;
         }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Courier New', monospace;
             margin: 0;
             padding: 0;
-            background-color: #f5f7fa;
-            color: #333;
-        }
-        header {
-            background-color: var(--primary);
-            color: white;
-            padding: 1rem 2rem;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            background-color: var(--bg);
+            color: var(--text);
             display: flex;
-            justify-content: space-between;
+            justify-content: center;
             align-items: center;
+            min-height: 100vh;
         }
-        h1 { margin: 0; font-size: 1.5rem; }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 2rem;
+        .game-container {
+            width: 1000px;
+            height: 700px;
+            background: var(--panel);
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 2rem;
+            grid-template-columns: 250px 1fr 250px;
+            grid-template-rows: 60px 1fr 150px;
+            border: 2px solid #444;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
         }
-        .full-width { grid-column: 1 / -1; }
         
-        .card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-            padding: 1.5rem;
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            background: #222;
+            border-bottom: 1px solid #444;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 1.5rem;
         }
-        .card h2 { margin-top: 0; color: var(--primary); border-bottom: 2px solid var(--light); padding-bottom: 0.5rem; }
+        .title { font-size: 1.5rem; color: var(--accent); font-weight: bold; text-shadow: 1px 1px 2px black; }
+        .status { font-size: 0.9rem; color: #888; }
         
-        button {
-            background-color: var(--secondary);
+        /* Panels */
+        .panel { padding: 1rem; overflow-y: auto; }
+        .left-panel { border-right: 1px solid #444; background: #252525; }
+        .right-panel { border-left: 1px solid #444; background: #252525; }
+        .main-view { 
+            position: relative; 
+            background: #111; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center;
+            background-image: radial-gradient(circle at center, #222 0%, #111 100%);
+        }
+        
+        /* Stats */
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.9rem; }
+        .stat-label { color: #aaa; }
+        .stat-val { color: white; font-weight: bold; }
+        
+        /* Log */
+        .log-container {
+            grid-column: 1 / -1;
+            background: #000;
+            border-top: 1px solid #444;
+            padding: 1rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            overflow-y: auto;
+            color: #ccc;
+        }
+        .log-entry { margin-bottom: 0.25rem; }
+        .log-info { color: #3498db; }
+        .log-combat { color: #e74c3c; }
+        .log-loot { color: #f1c40f; }
+        .log-success { color: #2ecc71; }
+        
+        /* UI Elements */
+        .btn {
+            background: var(--primary);
             color: white;
-            border: none;
+            border: 1px solid #555;
             padding: 0.5rem 1rem;
-            border-radius: 4px;
+            width: 100%;
+            margin-bottom: 0.5rem;
             cursor: pointer;
-            font-size: 1rem;
-            transition: background 0.2s;
+            font-family: inherit;
+            text-transform: uppercase;
+            transition: all 0.1s;
         }
-        button:hover { background-color: #2980b9; }
-        button.accent { background-color: var(--accent); }
-        button.accent:hover { background-color: #c0392b; }
-        button.success { background-color: var(--success); }
+        .btn:hover { background: #34495e; border-color: #777; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-action { background: var(--secondary); font-weight: bold; height: 3rem; font-size: 1.1rem; }
+        .btn-action:hover { background: #c0392b; }
         
-        .query-box {
-            background-color: #f8f9fa;
-            border: 1px solid #ddd;
-            border-radius: 4px;
+        .hero-card {
+            border: 1px solid #444;
             padding: 1rem;
             margin-bottom: 1rem;
+            background: #2a2a2a;
             cursor: pointer;
-            transition: all 0.2s;
         }
-        .query-box:hover { border-color: var(--secondary); transform: translateY(-2px); }
-        .query-box h3 { margin: 0 0 0.5rem 0; font-size: 1.1rem; }
-        .query-box p { margin: 0; color: #666; font-size: 0.9rem; }
+        .hero-card:hover { border-color: var(--accent); }
+        .hero-card.selected { border-color: var(--success); background: #223322; }
         
-        pre {
-            background-color: #2d3436;
-            color: #a29bfe;
-            padding: 1rem;
-            border-radius: 4px;
-            overflow-x: auto;
-            font-size: 0.9rem;
-        }
-        
-        .result-item {
-            border-left: 4px solid var(--secondary);
-            background: #fff;
-            margin-bottom: 0.5rem;
-            padding: 0.5rem 1rem;
-        }
-        .score { float: right; font-weight: bold; color: var(--success); }
-        
-        #status {
-            position: fixed;
-            bottom: 1rem;
-            right: 1rem;
+        .scene-image {
+            width: 200px;
+            height: 200px;
             background: #333;
-            color: white;
-            padding: 0.5rem 1rem;
-            border-radius: 4px;
-            display: none;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3rem;
+            color: #555;
+            border: 2px solid #444;
         }
         
-        .hidden { display: none; }
+        .health-bar {
+            width: 100%;
+            height: 10px;
+            background: #444;
+            margin-top: 5px;
+        }
+        .health-fill {
+            height: 100%;
+            background: #e74c3c;
+            width: 100%;
+            transition: width 0.3s;
+        }
+        
+        #loading-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        .loader { margin-top: 1rem; color: var(--accent); }
+        
+        /* Screens */
+        .screen { width: 100%; height: 100%; display: none; flex-direction: column; align-items: center; justify-content: center; }
+        .screen.active { display: flex; }
+        
     </style>
 </head>
 <body>
 
-<header>
-    <h1>OpenGameAssetLibrary Demo</h1>
-    <div>
-        <span id="connection-status">Checking API...</span>
-    </div>
-</header>
-
-<div class="container">
-    <!-- Setup Section -->
-    <div class="card full-width">
-        <h2>1. Library Setup</h2>
-        <p>Initialize the database with the demo dataset (Dungeon Crawler & Farming Sim assets).</p>
-        <button class="success" onclick="initializeLibrary()">Inject Demo Assets</button>
-        <span id="init-msg" style="margin-left: 1rem; color: #666;"></span>
-    </div>
-
-    <!-- Query Selection -->
-    <div class="card">
-        <h2>2. Select a Semantic Query</h2>
-        <p>Click a query to run it against the Ball Tree index.</p>
-        
-        <div class="query-box" onclick="runQuery(0)">
-            <h3>Find a Warrior (Combat Focus)</h3>
-            <p>Targeting a high-strength character in the dungeon crawler set.</p>
+<div class="game-container">
+    <header class="header">
+        <div class="title">DUNGEON CRAWLER</div>
+        <div class="status" id="connection-status">System: Online</div>
+    </header>
+    
+    <!-- Left: Hero Stats -->
+    <div class="panel left-panel">
+        <h3 style="color:var(--accent); border-bottom:1px solid #444; padding-bottom:5px;">HERO STATUS</h3>
+        <div id="hero-stats-content" style="display:none;">
+            <div style="margin-bottom:1rem; text-align:center;">
+                <strong id="hero-name" style="font-size:1.1rem;">-</strong><br>
+                <small id="hero-class" style="color:#888;">-</small>
+            </div>
+            
+            <div class="stat-row"><span>HP</span> <span id="stat-hp">100/100</span></div>
+            <div class="health-bar"><div class="health-fill" id="hp-bar"></div></div>
+            <br>
+            <div class="stat-row"><span>STR</span> <span class="stat-val" id="stat-str">0</span></div>
+            <div class="stat-row"><span>DEX</span> <span class="stat-val" id="stat-dex">0</span></div>
+            <div class="stat-row"><span>INT</span> <span class="stat-val" id="stat-int">0</span></div>
+            <div class="stat-row"><span>WIS</span> <span class="stat-val" id="stat-wis">0</span></div>
+            
+            <h4 style="margin-top:2rem; border-bottom:1px solid #444;">EQUIPMENT</h4>
+            <div id="equipment-list" style="font-size:0.8rem; color:#aaa;">
+                None
+            </div>
         </div>
-        
-        <div class="query-box" onclick="runQuery(1)">
-            <h3>Find a Farm Animal</h3>
-            <p>Looking for a milk-producing animal in the farming sim.</p>
-        </div>
-        
-        <div class="query-box" onclick="runQuery(2)">
-            <h3>Find Weather</h3>
-            <p>Searching for weather conditions, specifically rain.</p>
-        </div>
-        
-        <div class="query-box" onclick="runQuery(3)">
-            <h3>Find High Intellect NPC (Vague)</h3>
-            <p>Cross-genre search for high intelligence. Should find the Mage.</p>
-        </div>
-    </div>
-
-    <!-- Custom Query -->
-    <div class="card">
-        <h2>3. Custom Query</h2>
-        <p>Enter a JSON query object to search the library.</p>
-        <textarea id="custom-query-input" rows="6" style="width: 100%; padding: 0.5rem; font-family: monospace; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 1rem;">{
-  "game_type": "dungeon_crawler",
-  "role": "warrior"
-}</textarea>
-        <button class="secondary" onclick="runCustomQuery()">Run Custom Search</button>
-    </div>
-
-    <!-- Results Display -->
-    <div class="card">
-        <h2>4. Search Results</h2>
-        <div id="query-display" class="hidden">
-            <strong>Query JSON:</strong>
-            <pre id="query-json">{}</pre>
-        </div>
-        <div id="results-list">
-            <p style="color:#999; font-style:italic;">Select a query to see results here...</p>
+        <div id="hero-stats-placeholder" style="color:#666; text-align:center; margin-top:2rem;">
+            No Active Hero
         </div>
     </div>
     
-    <!-- Asset Browser -->
-    <div class="card full-width">
-        <h2>Current Assets in Library</h2>
-        <button onclick="loadAssets()">Refresh List</button>
-        <div id="asset-grid" style="margin-top:1rem; display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:1rem;">
-            <!-- Assets will populate here -->
+    <!-- Center: Main View -->
+    <div class="main-view">
+        <!-- Loading Overlay -->
+        <div id="loading-overlay">
+            <h2>INITIALIZING ASSET LIBRARY...</h2>
+            <div id="loading-msg" class="loader">Injecting game data...</div>
         </div>
+
+        <!-- Screen: Hero Select -->
+        <div id="screen-select" class="screen">
+            <h2 style="margin-bottom:2rem;">CHOOSE YOUR HERO</h2>
+            <div style="display:flex; gap:1rem;">
+                <div class="hero-card" onclick="selectClass('warrior')">
+                    <h3>WARRIOR</h3>
+                    <p style="font-size:0.8rem; color:#aaa;">Strong and tough.<br>Focus: Strength</p>
+                </div>
+                <div class="hero-card" onclick="selectClass('mage')">
+                    <h3>MAGE</h3>
+                    <p style="font-size:0.8rem; color:#aaa;">Master of arcane.<br>Focus: Intelligence</p>
+                </div>
+                <div class="hero-card" onclick="selectClass('rogue')">
+                    <h3>ROGUE</h3>
+                    <p style="font-size:0.8rem; color:#aaa;">Swift and deadly.<br>Focus: Dexterity</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Screen: Gameplay -->
+        <div id="screen-game" class="screen">
+            <div class="scene-image" id="scene-icon">🏰</div>
+            <h2 id="location-name">Town Entrance</h2>
+            <p id="scene-desc" style="max-width:400px; text-align:center; color:#aaa; margin-bottom:2rem;">
+                You stand at the gates of the dark dungeon.
+            </p>
+            
+            <div id="combat-ui" style="display:none; width:100%; text-align:center; margin-bottom:1rem;">
+                <h3 style="color:#e74c3c;" id="enemy-name">Enemy</h3>
+                <div class="health-bar" style="width:200px; margin:0 auto;"><div class="health-fill" id="enemy-hp-bar"></div></div>
+                <p id="enemy-status">HP: ??/??</p>
+            </div>
+
+            <div style="display:flex; gap:1rem;">
+                <button class="btn btn-action" id="btn-explore" onclick="gameAction('explore')">EXPLORE</button>
+                <button class="btn btn-action" id="btn-combat" onclick="gameAction('attack')" style="display:none; background:#c0392b;">ATTACK</button>
+            </div>
+            <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+                <button class="btn" onclick="gameAction('rest')">Rest</button>
+                <button class="btn" onclick="gameAction('search')">Search Area</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Right: Inventory / Info -->
+    <div class="panel right-panel">
+        <h3 style="color:var(--accent); border-bottom:1px solid #444; padding-bottom:5px;">INVENTORY</h3>
+        <div id="inventory-list">
+            <div style="padding:0.5rem; border-bottom:1px solid #333; font-size:0.9rem;">Empty</div>
+        </div>
+    </div>
+    
+    <!-- Bottom: Log -->
+    <div class="log-container" id="game-log">
+        <div class="log-entry log-info">> System initialized.</div>
     </div>
 </div>
 
-<div id="status"></div>
-
+<!-- Load Assets -->
 <script src="assets.js"></script>
+<script src="dungeon_assets.js"></script>
+
 <script>
     const API_URL = window.location.origin;
+    
+    // Game State
+    const Game = {
+        hero: null,
+        location: null,
+        enemy: null,
+        inventory: [],
+        isCombat: false
+    };
 
-    // --- Demo Data Definition ---
-    // DEMO_ASSETS is loaded from assets.js
-
-    const QUERIES = [
-        {
-            "game_type": "dungeon_crawler", "category": "character", "role": "warrior",
-            "stats": {"strength": 20}
-        },
-        {
-            "game_type": "farming_sim", "category": "animal", "produce": "milk"
-        },
-        {
-            "category": "weather", "condition": "rain"
-        },
-        {
-            "stats": {"intelligence": 18}
-        }
-    ];
-
-    // --- Functions ---
-
-    async function checkHealth() {
-        try {
-            const res = await fetch(`${API_URL}/ping`);
-            const data = await res.json();
-            document.getElementById('connection-status').innerText = `API: ${data.status} (v${data.version})`;
-            document.getElementById('connection-status').style.color = '#2ecc71';
-        } catch (e) {
-            document.getElementById('connection-status').innerText = 'API Disconnected';
-            document.getElementById('connection-status').style.color = '#e74c3c';
-        }
+    // --- System Functions ---
+    
+    function log(msg, type = 'info') {
+        const div = document.createElement('div');
+        div.className = `log-entry log-${type}`;
+        div.innerText = `> ${msg}`;
+        const container = document.getElementById('game-log');
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
     }
 
-    async function initializeLibrary() {
-        const msg = document.getElementById('init-msg');
-        msg.innerText = "Injecting assets...";
+    async function initGame() {
+        const overlay = document.getElementById('loading-overlay');
+        const msg = document.getElementById('loading-msg');
         
-        let count = 0;
-        for (const asset of DEMO_ASSETS) {
-            try {
-                await fetch(`${API_URL}/add`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(asset)
-                });
-                count++;
-                msg.innerText = `Injected ${count}/${DEMO_ASSETS.length}...`;
-            } catch (e) {
-                console.error("Failed to add asset", asset.name, e);
-            }
-        }
-        msg.innerText = "Done! Library initialized.";
-        loadAssets();
-    }
-
-    async function loadAssets() {
-        const grid = document.getElementById('asset-grid');
-        grid.innerHTML = "Loading...";
+        // Combine assets
+        // Check if server has assets or needs injection
         try {
-            const res = await fetch(`${API_URL}/browse`);
-            const data = await res.json();
+            // Just force inject to be safe/sure we have latest
+            // In a real app we'd check /stats or something first
+            msg.innerText = "Syncing Asset Library...";
             
-            grid.innerHTML = "";
-            data.assets.forEach(asset => {
-                const div = document.createElement('div');
-                div.className = 'card';
-                div.style.padding = '1rem';
-                div.style.boxShadow = 'none';
-                div.style.border = '1px solid #eee';
-                div.innerHTML = `<strong>${asset.name}</strong><br><small>${asset.type || asset.category}</small>`;
-                grid.appendChild(div);
+            // Filter only dungeon assets if mixed
+            // DEMO_ASSETS contains mixed. We want to ensure all are there.
+            const allAssets = [...DEMO_ASSETS]; // dungeoun_assets.js pushed to this global
+            
+            const res = await fetch(`${API_URL}/add_batch`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(allAssets)
             });
+            
+            if (res.ok) {
+                log("Library synced successfully.", "success");
+                overlay.style.display = "none";
+                showScreen('select');
+            } else {
+                msg.innerText = "Error syncing library. Check console.";
+            }
         } catch (e) {
-            grid.innerHTML = "Error loading assets.";
+            console.error(e);
+            msg.innerText = "Connection Failed. Is server running?";
         }
     }
 
-    async function runQuery(index) {
-        const query = QUERIES[index];
-        executeSearch(query);
+    function showScreen(id) {
+        document.querySelectorAll('.screen').forEach(el => el.classList.remove('active'));
+        document.getElementById(`screen-${id}`).classList.add('active');
     }
 
-    async function runCustomQuery() {
-        const input = document.getElementById('custom-query-input').value;
-        try {
-            const query = JSON.parse(input);
-            executeSearch(query);
-        } catch (e) {
-            alert("Invalid JSON format!");
-        }
-    }
+    // --- Library Interactions ---
 
-    async function executeSearch(query) {
-        // Show query
-        document.getElementById('query-display').classList.remove('hidden');
-        document.getElementById('query-json').innerText = JSON.stringify(query, null, 2);
-        
-        const resultsDiv = document.getElementById('results-list');
-        resultsDiv.innerHTML = "Searching...";
-        
+    async function findAsset(query) {
         try {
-            const res = await fetch(`${API_URL}/search?k=3`, {
+            // Use the similarity search "Under the Hood"
+            const res = await fetch(`${API_URL}/search?k=1`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(query)
             });
             const data = await res.json();
-            
-            resultsDiv.innerHTML = "";
             if (data.results && data.results.length > 0) {
-                data.results.forEach(item => {
-                    const div = document.createElement('div');
-                    div.className = 'result-item';
-                    // Calculate percentage score for display
-                    const score = Math.round(item.similarity_score * 100);
-                    
-                    div.innerHTML = `
-                        <span class="score">${score}% Match</span>
-                        <strong>${item.asset.name}</strong>
-                        <br>
-                        <small>${item.asset.category || ''} / ${item.asset.role || item.asset.species || ''}</small>
-                        <br>
-                        <small style="color:#666;">Distance: ${item.distance.toFixed(4)}</small>
-                    `;
-                    resultsDiv.appendChild(div);
-                });
-            } else {
-                resultsDiv.innerHTML = "No results found.";
+                return data.results[0].asset;
             }
         } catch (e) {
-            resultsDiv.innerHTML = "Error executing search.";
-            console.error(e);
+            console.error("Search failed", e);
+        }
+        return null;
+    }
+
+    // --- Game Logic ---
+
+    async function selectClass(role) {
+        log(`Searching library for suitable ${role}...`);
+        
+        // Intelligent Search: Find a character matching the role
+        const heroAsset = await findAsset({
+            "game_type": "dungeon_crawler",
+            "category": "character",
+            "role": role
+        });
+
+        if (heroAsset) {
+            Game.hero = {
+                ...heroAsset,
+                maxHp: 100, // Base stats for game balance
+                hp: 100,
+                xp: 0
+            };
+            
+            // Normalize stats if missing
+            if (!Game.hero.stats) Game.hero.stats = { strength: 10, dexterity: 10, intelligence: 10 };
+            
+            log(`Hero Found: ${Game.hero.name} (${Game.hero.race} ${Game.hero.role})`, "success");
+            updateHeroUI();
+            showScreen('game');
+            
+            // Start in a random location
+            findLocation();
+        } else {
+            log("No suitable hero found in library!", "error");
         }
     }
 
-    // Init
-    checkHealth();
-    loadAssets();
+    async function findLocation() {
+        // Find a low level location
+        const loc = await findAsset({
+            "game_type": "dungeon_crawler",
+            "category": "location",
+            "danger_level": 1
+        });
+        
+        if (loc) {
+            Game.location = loc;
+            updateLocationUI();
+        }
+    }
+
+    function updateHeroUI() {
+        if (!Game.hero) return;
+        
+        document.getElementById('hero-stats-placeholder').style.display = 'none';
+        document.getElementById('hero-stats-content').style.display = 'block';
+        
+        document.getElementById('hero-name').innerText = Game.hero.name;
+        document.getElementById('hero-class').innerText = `${Game.hero.race} ${Game.hero.role}`;
+        
+        document.getElementById('stat-str').innerText = Game.hero.stats.strength || 10;
+        document.getElementById('stat-dex').innerText = Game.hero.stats.dexterity || 10;
+        document.getElementById('stat-int').innerText = Game.hero.stats.intelligence || 10;
+        document.getElementById('stat-wis').innerText = Game.hero.stats.wisdom || 10;
+        
+        updateHpUI();
+        
+        // Inventory
+        const invList = document.getElementById('inventory-list');
+        invList.innerHTML = "";
+        if (Game.hero.inventory && Game.hero.inventory.length > 0) {
+            Game.hero.inventory.forEach(item => {
+                const div = document.createElement('div');
+                div.style.padding = '0.5rem';
+                div.style.borderBottom = '1px solid #333';
+                div.style.fontSize = '0.9rem';
+                div.innerText = typeof item === 'string' ? item : item.name;
+                invList.appendChild(div);
+            });
+        } else {
+            invList.innerHTML = "<div style='padding:0.5rem; color:#666;'>Empty</div>";
+        }
+    }
+    
+    function updateHpUI() {
+        const pct = (Game.hero.hp / Game.hero.maxHp) * 100;
+        document.getElementById('hp-bar').style.width = `${pct}%`;
+        document.getElementById('stat-hp').innerText = `${Math.ceil(Game.hero.hp)}/${Game.hero.maxHp}`;
+    }
+
+    function updateLocationUI() {
+        if (Game.location) {
+            document.getElementById('location-name').innerText = Game.location.name;
+            document.getElementById('scene-desc').innerText = Game.location.description;
+            
+            // Simple icon mapping based on name
+            let icon = "🏰";
+            const n = Game.location.name.toLowerCase();
+            if (n.includes('cave')) icon = "🕳️";
+            if (n.includes('forest')) icon = "🌲";
+            if (n.includes('ruins')) icon = "🏛️";
+            if (n.includes('dragon')) icon = "🌋";
+            document.getElementById('scene-icon').innerText = icon;
+        }
+    }
+
+    // --- Actions ---
+
+    async function gameAction(action) {
+        if (Game.isCombat && action !== 'attack') {
+            log("You are in combat! You must fight!", "combat");
+            return;
+        }
+
+        if (action === 'rest') {
+            const heal = 20;
+            Game.hero.hp = Math.min(Game.hero.maxHp, Game.hero.hp + heal);
+            updateHpUI();
+            log("You rested and recovered HP.", "success");
+            return;
+        }
+
+        if (action === 'explore') {
+            log("Exploring...");
+            
+            // Random Event: 40% Enemy, 30% Loot, 30% Nothing/Location Change
+            const roll = Math.random();
+            
+            if (roll < 0.4) {
+                // Spawn Enemy
+                await spawnEnemy();
+            } else if (roll < 0.7) {
+                // Find Loot
+                await findLoot();
+            } else {
+                // Change Location
+                await findLocation();
+                log(`You moved to ${Game.location.name}.`);
+            }
+        }
+        
+        if (action === 'attack') {
+            resolveCombatRound();
+        }
+        
+        if (action === 'search') {
+             await findLoot();
+        }
+    }
+
+    async function spawnEnemy() {
+        // Scale enemy by finding one with appropriate level
+        // For demo, just find "enemy" category
+        const enemy = await findAsset({
+            "game_type": "dungeon_crawler",
+            "category": "enemy"
+            // Could add level logic here
+        });
+        
+        if (enemy) {
+            Game.enemy = {
+                ...enemy,
+                maxHp: enemy.hp,
+                currentHp: enemy.hp
+            };
+            
+            startCombat();
+        } else {
+            log("You hear a noise, but find nothing.");
+        }
+    }
+    
+    async function findLoot() {
+        const item = await findAsset({
+             "game_type": "dungeon_crawler",
+             "category": "item",
+             "rarity": Math.random() > 0.8 ? "rare" : "common"
+        });
+        
+        if (item) {
+            log(`You found a ${item.name}!`, "loot");
+            // Add to inventory (simplified string or obj)
+            if (!Game.hero.inventory) Game.hero.inventory = [];
+            Game.hero.inventory.push(item);
+            updateHeroUI();
+        } else {
+            log("You searched but found nothing.");
+        }
+    }
+
+    function startCombat() {
+        Game.isCombat = true;
+        document.getElementById('btn-explore').style.display = 'none';
+        document.getElementById('btn-combat').style.display = 'block';
+        document.getElementById('combat-ui').style.display = 'block';
+        document.getElementById('scene-icon').innerText = "⚔️";
+        
+        document.getElementById('enemy-name').innerText = Game.enemy.name;
+        updateEnemyUI();
+        
+        log(`Encountered ${Game.enemy.name}!`, "combat");
+    }
+    
+    function updateEnemyUI() {
+        if(!Game.enemy) return;
+        const pct = (Game.enemy.currentHp / Game.enemy.maxHp) * 100;
+        document.getElementById('enemy-hp-bar').style.width = `${pct}%`;
+        document.getElementById('enemy-status').innerText = `HP: ${Game.enemy.currentHp}/${Game.enemy.maxHp}`;
+    }
+
+    function resolveCombatRound() {
+        if (!Game.enemy) return;
+
+        // Hero Attack
+        // Dmg = Str or Int based on class (simplified: max of stats / 2)
+        const stats = Game.hero.stats;
+        const dmgBase = Math.max(stats.strength || 0, stats.intelligence || 0, stats.dexterity || 0);
+        const dmg = Math.floor(dmgBase / 2) + Math.floor(Math.random() * 5);
+        
+        Game.enemy.currentHp -= dmg;
+        log(`You hit ${Game.enemy.name} for ${dmg} damage.`, "combat");
+        
+        updateEnemyUI();
+
+        if (Game.enemy.currentHp <= 0) {
+            endCombat(true);
+            return;
+        }
+
+        // Enemy Attack
+        const enemyDmg = (Game.enemy.damage || 5) + Math.floor(Math.random() * 3);
+        Game.hero.hp -= enemyDmg;
+        log(`${Game.enemy.name} hits you for ${enemyDmg} damage.`, "combat");
+        
+        updateHpUI();
+
+        if (Game.hero.hp <= 0) {
+            log("YOU DIED.", "combat");
+            alert("Game Over");
+            window.location.reload();
+        }
+    }
+
+    function endCombat(win) {
+        Game.isCombat = false;
+        document.getElementById('btn-explore').style.display = 'block';
+        document.getElementById('btn-combat').style.display = 'none';
+        document.getElementById('combat-ui').style.display = 'none';
+        
+        if (win) {
+            log(`Defeated ${Game.enemy.name}!`, "success");
+            // Chance for loot on kill
+            if(Math.random() > 0.5) findLoot();
+        }
+        
+        Game.enemy = null;
+        updateLocationUI(); // Reset icon
+    }
+
+    // Start
+    initGame();
 
 </script>
 

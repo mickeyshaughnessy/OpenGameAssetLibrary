@@ -380,6 +380,28 @@ class JSONDatabase:
             logger.error(f"Error inserting asset: {e}")
             raise
 
+    def insert_many(self, assets: List[Dict]):
+        """Insert multiple assets and rebuild index once."""
+        inserted_ids = []
+        for asset in assets:
+            asset_id = asset.get("id") or str(uuid.uuid4())
+            asset["id"] = asset_id
+            key = f"{self.assets_prefix}/{asset_id}.json"
+            try:
+                self.s3_client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=json.dumps(asset, indent=2),
+                    ContentType='application/json'
+                )
+                inserted_ids.append(asset_id)
+            except Exception as e:
+                logger.error(f"Error inserting asset {asset.get('name')}: {e}")
+        
+        # Rebuild index once after all inserts
+        self.rebuild_index()
+        return inserted_ids
+
     def search(self, query: Dict, k: int = 5):
         """Search for similar assets."""
         return self.tree.search(query, k)
